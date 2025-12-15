@@ -48,7 +48,7 @@ Open the **Triggers** tab.
 
 Click **New**.
 
-**Select "At startup"** for the begin task selection.
+**Select "At log on of any user"** for the begin task selection. We choose this over "At startup" because there is an issue with the caps-lock indicator not appearing if the task is initialized before a user is signed in.
 
 **Select "Delay task for:"** and put in 30 seconds. We put a delay after the system starts up to allow for the GG software to start first.
 ### Step 5:
