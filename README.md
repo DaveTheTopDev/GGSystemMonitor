@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="GGSystemMonitor_icon.png" width="120" alt="GGSystemMonitor Icon"/>
+![GGSystemMonitor Icon](https://imgur.com/a/FQeBH0W "GGSystemMonitor Icon")
 
 # GGSystemMonitor
 
@@ -66,10 +66,10 @@ Version 3.0.0 is a **complete rewrite** of GGSystemMonitor. Almost every aspect 
 ## Screenshots
 
 ### Settings - Display Tab
-![Settings Display Tab](screenshots/display_tab.png)
+![Display Settings Tab](https://imgur.com/a/XA5nGkK "Display Settings Tab")
 
 ### Settings - Temperature Tab
-![Settings Temperature Tab](screenshots/temperature_tab.png)
+![Temperature Settings Tab](https://imgur.com/a/zMbUmJi "Temperature Settings Tab")
 
 ---
 
