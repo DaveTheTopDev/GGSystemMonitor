@@ -1,95 +1,187 @@
+<div align="center">
+
+<img src="GGSystemMonitor_icon.png" width="120" alt="GGSystemMonitor Icon"/>
+
 # GGSystemMonitor
+
+**Bring hardware sensor data to your SteelSeries keyboard OLED screen.**  
+A fully automated, installer-based Windows app that hooks into SteelSeries GG software and displays live system metrics - right on your Apex Pro's OLED display.
+
+[![Release](https://img.shields.io/badge/release-v3.0.0-brightgreen?style=for-the-badge)](https://github.com/DaveTheTopDev/GGSystemMonitor/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows-blue?style=for-the-badge&logo=windows)](https://github.com/DaveTheTopDev/GGSystemMonitor)
+[![Language](https://img.shields.io/badge/language-C%23%20.NET-purple?style=for-the-badge&logo=dotnet)](https://github.com/DaveTheTopDev/GGSystemMonitor)
+[![RAM](https://img.shields.io/badge/memory-~16%20MB-orange?style=for-the-badge)](https://github.com/DaveTheTopDev/GGSystemMonitor)
+[![License](https://img.shields.io/badge/license-MIT-gray?style=for-the-badge)](LICENSE)
+
+### [⬇️ Download Latest Release](https://github.com/DaveTheTopDev/GGSystemMonitor/releases/download/3.0.0/GGSystemMonitor-V3.0.0.zip)
+
+</div>
+
+---
+
 ![Apex Pro TKL OLED Display of Temperatures](https://i.imgur.com/1GnrzHC.jpeg "Apex Pro TKL OLED Display of Temperatures")
 
-This is a custom application for SteelSeries GG software that imitates the long missing SystemMonitor application. It will display your CPU and GPU temperatures on the keyboard OLED screen, updating every two seconds. This will allow you to maintain an up to date GG software and carry over through updates, meaning you do not need to forcefully downgrade.
+---
 
-**This is specifically designed for the SteelSeries Apex Pro keyboard.**
+## Installation
 
-The application is a .NET app written in C#. It was designed on Windows and uses Windows Forms libraries, meaning it will not work on other operating systems (At least I believe, it is untested).
+1. **Download** the latest release zip from the [Releases](https://github.com/DaveTheTopDev/GGSystemMonitor/releases/tag/3.0.0) page and extract it
+2. **Run** `install.bat` inside the extracted folder - the installer will launch and guide you through setup
+3. When prompted, **accept the UAC dialog** to grant administrator rights (required for CPU temperature reading)
+4. Choose your **install path**, select desired shortcuts, and click **Install**
+5. The application will **launch automatically on Windows startup** - no further configuration needed
 
-To monitor the system temperatures, LibreHardwareMonitor is used and included. On many systems, the CPU temperature sensors are protected by an extra layer of security. **If you are seeing on your display that the CPU temperature is reading as N/A**, then you must run the exe file as administrator to fix this!
+> ✅ That's it! The app runs silently in the background (~16 MB RAM) and your OLED will start displaying sensor data automatically.
 
-The script itself runs in the background and uses only ~11 MB of memory.
+---
 
-There may be issues with reading the CPU temperature on certain systems. I myself designed it for my intel CPU system. In theory it should be able to work on any CPU, please create an issue if you face any problems!
+## Updating
+
+Updating is simple:
+
+1. **Download** the latest release zip from the [Releases](https://github.com/DaveTheTopDev/GGSystemMonitor/releases/tag/3.0.0) page and extract it
+2. **Run** `install.bat` inside the extracted folder - it will automatically update over your existing installation
+3. Done!
+
+---
+
+## What's New in v3.0.0 - Major Overhaul
+
+Version 3.0.0 is a **complete rewrite** of GGSystemMonitor. Almost every aspect of the application has been redesigned from the ground up.
+
+| | Change |
+|---|---|
+| 🚀 | **Installer modal** - one-click setup with path selection, shortcuts, and automatic startup. No more manual Task Scheduler setup. |
+| ⚙️ | **Settings GUI** - full in-app settings window with Display, Temperature, and General tabs |
+| 🔁 | **Rotating display lines** - configure multiple sensor items per line and rotate between them on a timer |
+| 📊 | **Expanded sensor support** - CPU temp, CPU usage %, GPU temp, GPU usage %, RAM usage, and custom text |
+| 📝 | **Custom text items** - display any text you want, mixed in with sensor data; long text auto-scrolls |
+| 🎛️ | **Format code control** - fine-grained control over how each value is displayed using placeholder format strings |
+| 🌡️ | **Auto hardware detection** - automatically detects your CPU/GPU and applies manufacturer critical temperature limits |
+| 🔔 | **Auto update detection** - the app notifies you when a new version is available |
+| 🐛 | **Major bug fixes** - numerous stability and compatibility improvements |
+
+---
+
+## Screenshots
+
+### Settings - Display Tab
+![Settings Display Tab](screenshots/display_tab.png)
+
+### Settings - Temperature Tab
+![Settings Temperature Tab](screenshots/temperature_tab.png)
+
+---
 
 ## Features
 
-The CPU average core temperature will be displayed on the first line; the fallback is the CPU package sensor, the extra fallback is to manually calculate the average from the cores. The GPU core temperature will be displayed on the second line.
+### Fully Automated Installer
+The new installer handles **everything** automatically:
+- Choose your install directory (defaults to `%LocalAppData%`)
+- Optionally add a **Start Menu** shortcut and/or a **Desktop** shortcut
+- **Auto-starts with Windows** - no manual Task Scheduler configuration needed
+- A one-time UAC prompt grants the required administrator privileges to read hardware sensors
 
-### Settings File
-There is a settings file in the applications folder called "settings.json" which can be used to configure all of the settings of the application. You can toggle the temperature warning indicators, the caps lock indicator, the GPU thermal paste monitoring feature, and modify the critical and warning temperature levels. By default, the CPU and GPU critical and warning temperatures are set to "AUTO" meaning that the program will automatically determine the critical temperature levels based on your hardware and the manufacturer's critical temperature rating.
+> ⚠️ **Note:** Administrator rights are required to read CPU temperature sensors. You may decline the UAC prompt and the app will still install and run, but the CPU temperature sensor will display `N/A`.
 
-### Caps Lock Indicator
-On the top line, right indented, it will display a '🡅' icon if your keyboard is in caps lock mode.
+---
 
-### Warning Indicators
-A large list of commonly known CPUs and GPUs is included within the script. When the script is started, it will detect your hardware and find the manufacturer's critical temperature levels. When the temperature for either your CPU or GPU reaches within **15°C** of the critical temperature, a small '⚠' icon will start blinking on the far right of the line to indicate that the hardware is reaching potentially dangerous levels of heat. When the temperature reaches within **7°C** of the critical temperature, a faster '🔥' icon will start blinking instead, indicating that the hardware is reaching very close to the critical temperature.
+### Display Configuration
+The **Display** tab in Settings gives you complete control over what appears on your OLED:
+
+- Configure **Top Line** and **Bottom Line** items independently
+- Add any combination of sensors and text, then **reorder** or **remove** items freely
+- Items **rotate** on a configurable interval (fallback: 3000ms by default)
+- Each item has a default display string that can be **fully customized** using format placeholder codes
+- A built-in **Placeholder Help** reference explains all available format codes
+
+**Available display items:**
+
+| Sensor | Example Output | Notes |
+|---|---|---|
+| CPU Temperature | `CPU: 72°C` | Requires admin rights; shows `N/A` without. Display in °C or °F. |
+| CPU Usage % | `CPU USE: 45%` | Default label editable via format codes. |
+| GPU Temperature | `GPU: 68°C` | Display in °C or °F. |
+| GPU Usage % | `GPU USE: 30%` | Default label editable via format codes. |
+| RAM Usage | `RAM: 8.2/32.0GB` | Display in GB or MB. Used / total. |
+| Custom Text | Any text | Auto-scrolls if too long for display. |
+
+---
+
+### Temperature Warning System
+The **Temperature** tab lets you configure warning thresholds for your hardware:
+
+- **Auto Detect** - the app queries your hardware against its built-in database and uses manufacturer TJMax/Max values automatically
+- Manually override **Warning** and **Critical** temperatures for both CPU and GPU
+- Configure the **temperature poll interval** (how frequently sensor values are refreshed)
+- Toggle warning indicators on or off per hardware independently
+- When temperature nears the **warning threshold** a `⚠` icon blinks on the display
+- When temperature nears the **critical threshold** a `🔥` icon blinks instead
+
+**Default thresholds (auto-detected where supported):**
+
+|  | Warning | Critical |
+|---|---|---|
+| CPU | TJMax - 15°C | TJMax - 5°C |
+| GPU | TJMax - 13°C | TJMax - 4°C |
+
+---
 
 ### GPU Thermal Paste Health Monitoring
-The script will also monitor your GPU's hot spot sensor. When a difference of **15°C** is reached between the GPU core and hot spot, the bottom line of the OLED will begin to display scrolling text, indicating to the user that there is an issue with the thermal cooling within the GPU and that serious damage can happen if it is not checked. It will also swap between the scrolling text momentarily to display the current GPU core temperature and then the current GPU hot spot temperature for the user to assess the levels.
+When the difference between your **GPU core** and **hot spot** temperatures exceeds **15°C**, the bottom OLED line begins scrolling a warning message - giving you an early heads-up that GPU thermal cooling may need attention.
 
-## Automatic Startup Task
-This section is instructions on making the custom application run upon starting your computer so that it is always displaying your system temperatures on the OLED without the need to run the exe file everytime. **These instructions are for Windows systems ONLY, specifically for Windows 10 but can be followed along roughly for other windows systems.**
-### Step 1:
-**Download the zip file from the Releases section and extract it to somewhere on your computer.** For these instructions it will be assumed that you would have extracted the folder and dragged out the GGSystemMonitor-[latest-version] folder (Next to the README.txt file) directly into your C drive directory.
-### Step 2:
-**Open Task Scheduler** (Press the windows button and search for "Task Scheduler")
+---
 
-Select **"Create Task"**
-### Step 3:
-**Name** the task whatever you want (Recommended name: GGSystemMonitor).
+### Caps Lock Indicator
+When Caps Lock is active, a `🡅` icon appears on the top line of the OLED - toggleable from the General settings tab.
 
-**Check the box "Run with highest privileges"** so that our script will be run as administrator to read CPU temperatures.
+---
 
-**Set the configuration** for your windows system (e.g. Windows 10 if on Windows 10).
-### Step 4:
-Open the **Triggers** tab.
+### Auto Update Detection
+GGSystemMonitor automatically checks for new releases and notifies you when an update is available.
 
-Click **New**.
+---
 
-**Select "At log on of any user"** for the begin task selection. We choose this over "At startup" because there is an issue with the caps-lock indicator not appearing if the task is initialized before a user is signed in.
+## General Settings
 
-**Select "Delay task for:"** and put in 30 seconds. We put a delay after the system starts up to allow for the GG software to start first.
-### Step 5:
-Open the **Actions** tab.
+The **General** tab includes:
 
-Click **New**.
+| Setting | Description |
+|---|---|
+| Update Available Notification | When a new version is available, a notification is shown on the OLED display. Toggle this on or off. |
+| Caps Lock Indicator | Toggle the Caps Lock `🡅` display icon on/off. |
+| SteelSeries GG Path | Path to your `coreProps.json` file. By default GG installs to `C:\ProgramData\SteelSeries\SteelSeries Engine 3\coreProps.json`. Only change this if you installed SteelSeries GG to a non-default location. |
 
-**Select "Start a program"** for the action.
+---
 
-Now click **Browse** for the Program/script section and select the GGSystemMonitor.exe file where you saved it. Where you save it is important, for these instructions as mentioned earlier, we will go under the assumption that it was saved directly into the C drive so the path would look like "C:\GGSystemMonitor-V2.1.0\GGSystemMonitor.exe"
+## Requirements
 
-Next, you will need to copy the system path to the folder you have the exe file in and put it in the **Start in:** section. So for this tutorial it would be "C:\GGSystemMonitor-V2.1.0" the folder where our exe file is.
+- **SteelSeries GG** software installed and running
+- **SteelSeries Apex Pro** keyboard (other SteelSeries OLED keyboards may work but are untested)
+- **Windows 10/11**
+- **.NET Runtime** (included with installer)
+- **Administrator rights** (for CPU sensor access - granted once at install time via UAC)
 
-### Step 6:
-Open the **Conditions** tab.
+---
 
-**Uncheck the box "Start the task only if the computer is on AC power"** this setting is more for labtops but just in case we uncheck it here.
-### Step 7:
-Open the **Settings** tab.
+## Technical Notes
 
-**Ensure that "Allow task to be run on demand" is checked.**
+- Built with **C# / .NET Windows Forms**
+- Uses **LibreHardwareMonitor** for hardware sensor access
+- Runs in the background using ~**16 MB** of memory
+- CPU temperature reading requires admin privileges; on systems where this is unavailable, CPU temp will show as `N/A`
+- Designed and tested on Intel CPU + NVIDIA GPU systems; should work on AMD hardware but may have edge cases - please [open an issue](https://github.com/DaveTheTopDev/GGSystemMonitor/issues) if you encounter any
 
-**Finally, click the Ok button.**
+---
 
-It is done! Now whenever you log on, after 30 seconds it will start displaying your CPU and GPU temperatures to your keyboards OLED display, updating every two seconds.
+## License
 
-## Updating
-When updates are released, it is very simple to update your app.
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
 
-**Open Task Manager and locate the GGSystemMonitor.exe service running, select it, and force close it.** This will allow you to remove your old version.
+---
 
-Simply download the new zip release from the releases section, **delete your old folder of your old version, and extract the folder into the same place.**
+<div align="center">
 
-Next, open your **Windows task scheduler and locate your custom startup task.**
+Made with ❤️ for the SteelSeries community
 
-Open the properties of your custom task.
-
-Navigate to the **Actions** tab, select your startup action, and click **Edit.**
-
-Click **Browse** and navigate to the newly updated apps folder and **select the GGSystemMonitor.exe file.**
-
-**Remember to also change the Start In setting**, set it to start in the apps folder (The GGSystemMonitor.exe files folder).
-
-And now it is updated!
+</div>
