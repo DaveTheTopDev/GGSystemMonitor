@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://i.imgur.com/LOQNvsW.png" width="512" alt="GGSystemMonitor Icon"/>
+<img src="https://i.imgur.com/LOQNvsW.png" width="256" alt="GGSystemMonitor Icon"/>
 
 # GGSystemMonitor
 
