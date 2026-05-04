@@ -1,6 +1,6 @@
 <div align="center">
 
-![GGSystemMonitor Icon](https://i.imgur.com/LOQNvsW.png | width=512 "GGSystemMonitor Icon")
+<img src="https://i.imgur.com/LOQNvsW.png" width="512" alt="GGSystemMonitor Icon"/>
 
 # GGSystemMonitor
 
