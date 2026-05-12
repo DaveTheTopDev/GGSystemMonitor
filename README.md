@@ -62,7 +62,7 @@ Version 3.0.0 is a **complete rewrite** of GGSystemMonitor. Almost every aspect 
 | 🐛 | **Major bug fixes** - numerous stability and compatibility improvements |
 
 ---
-
+<div align="center">
 ## Screenshots
 
 ### Settings - Display Tab
@@ -70,7 +70,7 @@ Version 3.0.0 is a **complete rewrite** of GGSystemMonitor. Almost every aspect 
 
 ### Settings - Temperature Tab
 ![Temperature Settings Tab](https://i.imgur.com/fNcIIAm.png "Temperature Settings Tab")
-
+</div>
 ---
 
 ## Features
