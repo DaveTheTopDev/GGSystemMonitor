@@ -65,11 +65,13 @@ Version 3.0.0 is a **complete rewrite** of GGSystemMonitor. Almost every aspect 
 
 ## Screenshots
 <div align="center">
+
 ### Settings - Display Tab
-![Display Settings Tab](https://i.imgur.com/O6HGDP0.png "Display Settings Tab")
+<img src="https://i.imgur.com/O6HGDP0.png" alt="Display Settings Tab"/>
 
 ### Settings - Temperature Tab
-![Temperature Settings Tab](https://i.imgur.com/fNcIIAm.png "Temperature Settings Tab")
+<img src="https://i.imgur.com/fNcIIAm.png" alt="Temperature Settings Tab"/>
+
 </div>
 
 ---
