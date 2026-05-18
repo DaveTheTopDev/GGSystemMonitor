@@ -247,7 +247,55 @@ function Get-AppVersion($path) {
     } catch { return "" }
 }
 
-$script:isUpdate      = (Test-Path $UninstallRegKey) -and (Test-Path $ExePath)
+function Get-ExistingInstallDir {
+    $candidates = @()
+
+    if (Test-Path $UninstallRegKey) {
+        try {
+            $reg = Get-ItemProperty -Path $UninstallRegKey -ErrorAction Stop
+
+            if ($reg.InstallLocation) {
+                $candidates += [string]$reg.InstallLocation
+            }
+
+            if ($reg.DisplayIcon) {
+                $iconPath = ([string]$reg.DisplayIcon).Trim().Trim('"') -replace ',\d+$', ''
+                if ($iconPath) {
+                    try { $candidates += Split-Path -Parent $iconPath } catch {}
+                }
+            }
+
+            if ($reg.UninstallString) {
+                $quotedPaths = [regex]::Matches([string]$reg.UninstallString, '"([^"]+\.(?:bat|ps1|exe))"')
+                foreach ($match in $quotedPaths) {
+                    try { $candidates += Split-Path -Parent $match.Groups[1].Value } catch {}
+                }
+            }
+        } catch {}
+    }
+
+    $candidates += (Join-Path $env:LOCALAPPDATA $AppName)
+
+    foreach ($candidate in ($candidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
+        try {
+            $dir = [System.IO.Path]::GetFullPath($candidate).TrimEnd('\')
+            if (Test-Path (Join-Path $dir $ExeName)) {
+                return $dir
+            }
+        } catch {}
+    }
+
+    return ""
+}
+
+$existingInstallDir = Get-ExistingInstallDir
+if (-not [string]::IsNullOrWhiteSpace($existingInstallDir)) {
+    $InstallDir = $existingInstallDir
+    $ExePath    = Join-Path $InstallDir $ExeName
+    $IconPath   = Join-Path $InstallDir $IconName
+}
+
+$script:isUpdate      = -not [string]::IsNullOrWhiteSpace($existingInstallDir)
 $newVer               = Get-AppVersion (Join-Path $SourceDir $ExeName)
 $curVer               = if ($script:isUpdate) { Get-AppVersion $ExePath } else { "" }
 $script:isSameVersion = $script:isUpdate -and $newVer -ne "" -and $curVer -eq $newVer
@@ -271,7 +319,11 @@ $clrBannerIcon = if ($script:isSameVersion) { [System.Drawing.Color]::FromArgb(1
 # -- Form --
 $form                 = New-Object System.Windows.Forms.Form
 $form.Text            = "GGSystemMonitor Installer"
-$form.ClientSize      = New-Object System.Drawing.Size(480, 430)
+$form.ClientSize      = if ($script:isUpdate) {
+    New-Object System.Drawing.Size(480, 320)
+} else {
+    New-Object System.Drawing.Size(480, 430)
+}
 $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
 $form.StartPosition   = [System.Windows.Forms.FormStartPosition]::CenterScreen
 $form.MaximizeBox     = $false
@@ -378,7 +430,10 @@ $optGroup.Text      = "Options"
 $optGroup.Location  = New-Object System.Drawing.Point(16, 210)
 $optGroup.Size      = New-Object System.Drawing.Size(448, 120)
 $optGroup.ForeColor = [System.Drawing.Color]::FromArgb(50, 50, 68)
-$form.Controls.Add($optGroup)
+$optGroup.Visible   = -not $script:isUpdate
+if (-not $script:isUpdate) {
+    $form.Controls.Add($optGroup)
+}
 
 $chkAutoStart          = New-Object System.Windows.Forms.CheckBox
 $chkAutoStart.Text     = "Start automatically when Windows starts"
@@ -402,7 +457,11 @@ $chkDesktop.Location = New-Object System.Drawing.Point(14, 88)
 $optGroup.Controls.Add($chkDesktop)
 
 $progressBar          = New-Object System.Windows.Forms.ProgressBar
-$progressBar.Location = New-Object System.Drawing.Point(16, 346)
+$progressBar.Location = if ($script:isUpdate) {
+    New-Object System.Drawing.Point(16, 226)
+} else {
+    New-Object System.Drawing.Point(16, 346)
+}
 $progressBar.Size     = New-Object System.Drawing.Size(448, 16)
 $progressBar.Minimum  = 0
 $progressBar.Maximum  = 100
@@ -440,6 +499,9 @@ $footer.Controls.Add($btnCancel)
 
 # -- Events --
 $script:installDone = $false
+$script:openSettingsAfterClose = $false
+$script:settingsExePath = ""
+$script:settingsWorkingDirectory = ""
 
 $btnBrowseInstall.Add_Click({
     $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
@@ -453,6 +515,17 @@ $btnBrowseInstall.Add_Click({
 
 $btnCancel.Add_Click({ $form.Close() })
 
+$form.Add_FormClosed({
+    if ($script:openSettingsAfterClose -and
+        -not [string]::IsNullOrWhiteSpace($script:settingsExePath) -and
+        (Test-Path $script:settingsExePath)) {
+        Start-Process -FilePath $script:settingsExePath `
+            -ArgumentList "--settings" `
+            -WorkingDirectory $script:settingsWorkingDirectory `
+            -ErrorAction SilentlyContinue
+    }
+})
+
 $btnInstall.Add_Click({
     # Second click (after install) -> close
     if ($script:installDone) { $form.Close(); return }
@@ -460,7 +533,7 @@ $btnInstall.Add_Click({
     $InstallDir = $txtInstallPath.Text.Trim()
     $ExePath    = Join-Path $InstallDir $ExeName
 
-    $btnInstall.Text     = "Installing..."
+    $btnInstall.Text     = if ($script:isUpdate) { "Updating..." } else { "Installing..." }
     $btnInstall.Enabled  = $false
     $btnCancel.Enabled   = $false
     $chkAutoStart.Enabled  = $false
@@ -507,30 +580,33 @@ $btnInstall.Add_Click({
             Set-Content $uninstallBat -Encoding ASCII
         $progressBar.Value = 62; $form.Refresh()
 
-        # Scheduled task (always remove old one first, then recreate if checked)
-        if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-        }
-        if ($chkAutoStart.Checked) {
-            $action    = New-ScheduledTaskAction -Execute $ExePath -WorkingDirectory $InstallDir
-            $trigger   = New-ScheduledTaskTrigger -AtLogon -User ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)
-            $settings  = New-ScheduledTaskSettingsSet `
-                             -AllowStartIfOnBatteries `
-                             -DontStopIfGoingOnBatteries `
-                             -ExecutionTimeLimit ([System.TimeSpan]::Zero) `
-                             -MultipleInstances IgnoreNew
-            $principal = New-ScheduledTaskPrincipal `
-                             -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) `
-                             -LogonType Interactive `
-                             -RunLevel Highest
-            Register-ScheduledTask `
-                -TaskName    $TaskName `
-                -Action      $action `
-                -Trigger     $trigger `
-                -Settings    $settings `
-                -Principal   $principal `
-                -Description "Displays CPU and GPU temperatures on SteelSeries keyboard OLED. https://github.com/$Publisher/$AppName" `
-                | Out-Null
+        # Scheduled task is an install-time preference. Updates preserve the
+        # user's existing startup choice instead of recreating it implicitly.
+        if (-not $script:isUpdate) {
+            if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+                Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+            }
+            if ($chkAutoStart.Checked) {
+                $action    = New-ScheduledTaskAction -Execute $ExePath -WorkingDirectory $InstallDir
+                $trigger   = New-ScheduledTaskTrigger -AtLogon -User ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)
+                $settings  = New-ScheduledTaskSettingsSet `
+                                 -AllowStartIfOnBatteries `
+                                 -DontStopIfGoingOnBatteries `
+                                 -ExecutionTimeLimit ([System.TimeSpan]::Zero) `
+                                 -MultipleInstances IgnoreNew
+                $principal = New-ScheduledTaskPrincipal `
+                                 -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) `
+                                 -LogonType Interactive `
+                                 -RunLevel Highest
+                Register-ScheduledTask `
+                    -TaskName    $TaskName `
+                    -Action      $action `
+                    -Trigger     $trigger `
+                    -Settings    $settings `
+                    -Principal   $principal `
+                    -Description "Displays CPU and GPU temperatures on SteelSeries keyboard OLED. https://github.com/$Publisher/$AppName" `
+                    | Out-Null
+            }
         }
         $progressBar.Value = 74; $form.Refresh()
 
@@ -551,37 +627,46 @@ $btnInstall.Add_Click({
 
         $shortcutIcon = if (Test-Path $IconPath) { "$IconPath,0" } else { "$ExePath,0" }
 
-        # Start Menu shortcut
-        if ($chkShortcut.Checked) {
-            $lnkPath = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$AppName.lnk"
-            $shell   = New-Object -ComObject WScript.Shell
-            $lnk     = $shell.CreateShortcut($lnkPath)
-            $lnk.TargetPath       = $ExePath
-            $lnk.Arguments        = "--settings"
-            $lnk.WorkingDirectory = $InstallDir
-            $lnk.Description      = "GGSystemMonitor Settings"
-            $lnk.IconLocation     = $shortcutIcon
-            $lnk.Save()
+        if (-not $script:isUpdate) {
+            # Start Menu shortcut
+            if ($chkShortcut.Checked) {
+                $lnkPath = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$AppName.lnk"
+                $shell   = New-Object -ComObject WScript.Shell
+                $lnk     = $shell.CreateShortcut($lnkPath)
+                $lnk.TargetPath       = $ExePath
+                $lnk.Arguments        = "--settings"
+                $lnk.WorkingDirectory = $InstallDir
+                $lnk.Description      = "GGSystemMonitor Settings"
+                $lnk.IconLocation     = $shortcutIcon
+                $lnk.Save()
+            }
         }
         $progressBar.Value = 92; $form.Refresh()
 
-        # Desktop shortcut
-        if ($chkDesktop.Checked) {
-            $deskLnkPath = Join-Path ([System.Environment]::GetFolderPath('Desktop')) "GG System Monitor.lnk"
-            $shell       = New-Object -ComObject WScript.Shell
-            $lnk         = $shell.CreateShortcut($deskLnkPath)
-            $lnk.TargetPath       = $ExePath
-            $lnk.Arguments        = "--settings"
-            $lnk.WorkingDirectory = $InstallDir
-            $lnk.Description      = "GGSystemMonitor Settings"
-            $lnk.IconLocation     = $shortcutIcon
-            $lnk.Save()
+        if (-not $script:isUpdate) {
+            # Desktop shortcut
+            if ($chkDesktop.Checked) {
+                $deskLnkPath = Join-Path ([System.Environment]::GetFolderPath('Desktop')) "GG System Monitor.lnk"
+                $shell       = New-Object -ComObject WScript.Shell
+                $lnk         = $shell.CreateShortcut($deskLnkPath)
+                $lnk.TargetPath       = $ExePath
+                $lnk.Arguments        = "--settings"
+                $lnk.WorkingDirectory = $InstallDir
+                $lnk.Description      = "GGSystemMonitor Settings"
+                $lnk.IconLocation     = $shortcutIcon
+                $lnk.Save()
+            }
         }
         $progressBar.Value = 96; $form.Refresh()
 
         # -- Success state --
         $script:installDone = $true
         $progressBar.Value  = 100
+        if ($script:isUpdate) {
+            $script:openSettingsAfterClose = $true
+            $script:settingsExePath = $ExePath
+            $script:settingsWorkingDirectory = $InstallDir
+        }
         $form.Refresh()
 
         # Use a timer so the UI thread stays free and the progress bar animation
@@ -624,6 +709,7 @@ $btnInstall.Add_Click({
         $completeTimer.Start()
 
     } catch {
+        $script:openSettingsAfterClose = $false
         [System.Windows.Forms.MessageBox]::Show(
             "Installation failed:`n`n$_",
             "Installation Error",
