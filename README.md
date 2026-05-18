@@ -70,7 +70,7 @@ Version 3.1.0 is a feature update that adds new widgets, drastically improves th
 <div align="center">
 
 ### Settings - Display Tab
-<img src="https://i.imgur.com/O6HGDP0.png" alt="Display Settings Tab"/>
+<img src="https://i.imgur.com/3EN3WHh.png" alt="Display Settings Tab"/>
 
 </div>
 
