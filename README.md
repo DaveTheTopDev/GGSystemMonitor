@@ -103,18 +103,67 @@ The **Display** tab in Settings gives you complete control over what appears on 
 
 ### Available Widgets
 
-| Widget | Example Output | Notes |
-|---|---|---|
-| CPU Temperature | `CPU: 72°C` | Requires admin rights; shows `N/A` without. Display in °C or °F. Select which CPU sensor to read. |
-| CPU Usage % | `CPU USE: 45%` | Default label editable via format codes. |
-| GPU Temperature | `GPU: 68°C` | Display in °C or °F. Select which GPU sensor to read. APU graphics supported. |
-| GPU Usage % | `GPU USE: 30%` | APU graphics supported. |
-| RAM Usage | `RAM: 8.2/32.0GB` | Display in GB or MB. Used / total. |
-| **Weather** | `☀ 5°C - Sunny` | Live weather + conditions for your location. See note below. |
-| **Now Playing** | `♪ Artist - Song` | Currently playing media. Auto-scrolls if too long. |
-| **Time** | `🕒 11:32:06 AM` | Current time. Configurable format (12h / 24h). |
-| **Date** | `📅 May 17, 2026` | Current date. Configurable format. |
-| Custom Text | Any text | Auto-scrolls if too long for display. |
+<table>
+  <thead>
+    <tr>
+      <th width="16%">Widget</th>
+      <th width="16%">Example Output</th>
+      <th width="60%">Notes</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>CPU Temperature</td>
+      <td><code>CPU: 72°C</code></td>
+      <td>Requires admin rights; shows <code>N/A</code> without. Display in °C or °F. Select which CPU sensor to read.</td>
+    </tr>
+    <tr>
+      <td>CPU Usage %</td>
+      <td><code>CPU USE: 45%</code></td>
+      <td>Default label editable via format codes.</td>
+    </tr>
+    <tr>
+      <td>GPU Temperature</td>
+      <td><code>GPU: 68°C</code></td>
+      <td>Display in °C or °F. Select which GPU sensor to read. APU graphics supported.</td>
+    </tr>
+    <tr>
+      <td>GPU Usage %</td>
+      <td><code>GPU USE: 30%</code></td>
+      <td>APU graphics supported.</td>
+    </tr>
+    <tr>
+      <td>RAM Usage</td>
+      <td><code>RAM: 8.2/32.0GB</code></td>
+      <td>Display in GB or MB. Used / total.</td>
+    </tr>
+    <tr>
+      <td>Weather</td>
+      <td><code>☀ 5°C - Sunny</code></td>
+      <td>Live weather + conditions for your location. See note below.</td>
+    </tr>
+    <tr>
+      <td>Now Playing</td>
+      <td><code>♪ Artist - Song</code></td>
+      <td>Currently playing media. Auto-scrolls if too long.</td>
+    </tr>
+    <tr>
+      <td>Time</td>
+      <td><code>🕒 11:32:06 AM</code></td>
+      <td>Current time. Configurable format (12h / 24h).</td>
+    </tr>
+    <tr>
+      <td>Date</td>
+      <td><code>📅 May 17, 2026</code></td>
+      <td>Current date. Configurable format.</td>
+    </tr>
+    <tr>
+      <td>Custom Text</td>
+      <td>Any text</td>
+      <td>Auto-scrolls if too long for display.</td>
+    </tr>
+  </tbody>
+</table>
 
 > 🌤️ **Weather Widget Note:** For locations in **Canada**, weather data is pulled directly from **Environment Canada** for high accuracy. For the rest of the world, it pulls from a global database and may be slightly less accurate.
 
