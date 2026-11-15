@@ -65,7 +65,7 @@ Version 3.2.0 focuses on hardware selection, standalone setup, diagnostics, and 
 | 📉 | **Performance improvements** - bounded caches/logs, disposed resources, and no forced working-set trimming |
 | 🩺 | **Accurate sensor diagnostics** - missing CPU readings no longer automatically claim antivirus blocking |
 
-> **Test candidate:** External OLED devices, affected CPU systems, and Apex 7 cold-boot lighting still need owner validation. See [test results](TEST-RESULTS.md).
+> **Test candidate:** External OLED devices, affected CPU systems, and Apex 7 cold-boot lighting still need owner validation.
 
 ---
 
@@ -259,7 +259,7 @@ The standalone release installer bundles and installs PawnIO and .NET automatica
 Review protection history for specific blocked components. Do not disable antivirus or
 Memory Integrity. Exclusions do not fix every failure. Other widgets remain available.
 
-See [3.2.0 candidate notes](RELEASE-NOTES.md) for verification and experimental device support.
+Arctis Pro Wireless and GameDAC output profiles remain experimental and need device-owner testing.
 
 ---
 

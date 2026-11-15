@@ -17,7 +17,6 @@ Get-ChildItem -LiteralPath $output -File | Where-Object { $_.Extension -notin @(
 Copy-Item -LiteralPath (Join-Path $root "Install.bat") -Destination (Split-Path $output)
 Copy-Item -LiteralPath (Join-Path $root "LICENSE") -Destination $output
 Copy-Item -LiteralPath (Join-Path $root "THIRD-PARTY-NOTICES.md") -Destination $output
-Copy-Item -LiteralPath (Join-Path $root "RELEASE-NOTES.md") -Destination $output
 # Download only at build time, then ship all prerequisites inside the ZIP.
 $cache = Join-Path $root "obj\prerequisites"
 New-Item -ItemType Directory -Force -Path $cache | Out-Null
