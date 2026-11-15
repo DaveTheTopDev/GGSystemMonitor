@@ -1,0 +1,21 @@
+name: Build and regression
+on: [push, pull_request]
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - run: dotnet restore GGSystemMonitor.csproj --locked-mode
+      - run: dotnet build tests/Regression.csproj -c Release
+      - run: tests\bin\Release\net472\Regression.exe
+      - run: powershell -NoProfile -File tests/Prerequisites.Tests.ps1
+      - run: powershell -NoProfile -File tests/InstallerLifecycle.Tests.ps1
+      - run: powershell -NoProfile -File tests/Shortcuts.Tests.ps1
+      - shell: powershell
+        run: |
+          $tokens=$null; $errors=$null
+          [System.Management.Automation.Language.Parser]::ParseFile("$pwd\Install.ps1", [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count) { throw ($errors | Out-String) }

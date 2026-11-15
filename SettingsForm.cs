@@ -13,7 +13,7 @@ using static GGSystemMonitor.Program;
 
 namespace GGSystemMonitor
 {
-    internal class SettingsForm : Form
+    internal partial class SettingsForm : Form
     {
         // ----------------------------------------------------------------
         //  Static data
@@ -68,7 +68,7 @@ namespace GGSystemMonitor
             public bool    CapsLock, ShowUpdateNotif;
             public decimal Rotation;
             public string  GgPath;
-            public string  OledFont;
+            public string  OledFont, OutputProfile;
             public string  TopItemsJson, BottomItemsJson;
         }
 
@@ -150,6 +150,7 @@ namespace GGSystemMonitor
             _statusTimer = new System.Windows.Forms.Timer { Interval = 2000 };
             _statusTimer.Tick += (s, e) => { UpdateStatus(); RefreshHardwareDetection(); };
             _statusTimer.Start();
+            InitializeTray();
             UpdateStatus();
             RefreshHardwareDetection();
 
@@ -157,6 +158,7 @@ namespace GGSystemMonitor
             updatePopupTimer.Tick += (s, e) =>
             {
                 updatePopupTimer.Stop();
+                updatePopupTimer.Dispose();
                 string v = Program.AvailableVersion;
                 if (v != null) ShowUpdateDialog(v);
             };
@@ -202,6 +204,7 @@ namespace GGSystemMonitor
             Rotation        = _rotationNud.Value,
             GgPath          = _ggPathBox.Text,
             OledFont        = _oledFontCombo?.SelectedIndex == 0 ? "" : _oledFontCombo?.SelectedItem?.ToString() ?? "",
+            OutputProfile = _outputProfile?.SelectedItem?.ToString() ?? "",
             TopItemsJson    = SerializeItems(_topList),
             BottomItemsJson = SerializeItems(_bottomList),
         };
@@ -213,6 +216,7 @@ namespace GGSystemMonitor
             if (cur.ShowUpdateNotif != _baseline.ShowUpdateNotif) return true;
             if (cur.Rotation        != _baseline.Rotation)        return true;
             if (cur.GgPath          != _baseline.GgPath)          return true;
+            if (cur.OutputProfile != _baseline.OutputProfile) return true;
             if (cur.OledFont        != _baseline.OledFont)        return true;
             if (cur.TopItemsJson    != _baseline.TopItemsJson)    return true;
             if (cur.BottomItemsJson != _baseline.BottomItemsJson) return true;
@@ -282,6 +286,7 @@ namespace GGSystemMonitor
             };
             tabs.TabPages.Add(BuildDisplayTab());
             tabs.TabPages.Add(BuildGeneralTab());
+            tabs.TabPages.Add(BuildDiagnosticsTab());
 
             tabs.SelectedIndexChanged += (s, e) =>
             {
@@ -662,6 +667,28 @@ namespace GGSystemMonitor
                 DropDownStyle = ComboBoxStyle.DropDownList,
                 Visible       = false
             };
+            bool suppressSensor = false;
+            var deviceCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 390, Height = 22, Left = 60, Top = 250, Visible = false };
+            group.Controls.Add(deviceCombo);
+            void PopulateDevice()
+            {
+                var selectedItem = localList.SelectedItem as LineItem;
+                bool applicable = NormType(selectedItem) == "cputemperature" || NormType(selectedItem) == "gputemperature" || NormType(selectedItem) == "gpuusage";
+                deviceCombo.Visible = applicable;
+                if (applicable) { suppressSensor = true; PopulateHardwareCombo(deviceCombo, localSensorCombo, selectedItem); suppressSensor = false; }
+            }
+            deviceCombo.SelectionChangeCommitted += (sender, args) =>
+            {
+                var item = localList.SelectedItem as LineItem;
+                if (item == null) return;
+                item.HardwareId = (deviceCombo.SelectedItem as HardwareChoice)?.Id ?? "";
+                item.SensorOverride = null;
+                suppressSensor = true;
+                PopulateHardwareCombo(deviceCombo, localSensorCombo, item);
+                suppressSensor = false;
+                EvaluateDirty();
+            };
+            localList.SelectedIndexChanged += (sender, args) => PopulateDevice();
             sensorCombo = localSensorCombo;
             sensorLabel = localSensorLabel;
 
@@ -674,7 +701,7 @@ namespace GGSystemMonitor
 
             bool suppressLabel   = false;
             bool suppressRefresh = false;
-            bool suppressSensor  = false;
+
             bool warnRowVisible  = false;
 
             void SetWarnRowVisible(bool visible)
@@ -774,6 +801,7 @@ namespace GGSystemMonitor
                 if (norm == "weather")        { ShowExtPanel(_weatherExtPanel, ref _weatherHost,  group, getOtherList); PopulateWeatherExtPanel(item); }
                 else                          HideExtPanel(_weatherExtPanel, ref _weatherHost,  group);
 
+                PopulateDevice();
                 ApplyWarnShift(warnRowVisible);
             };
 
@@ -784,7 +812,7 @@ namespace GGSystemMonitor
                 if (item == null) return;
                 string selected = localSensorCombo.SelectedIndex <= 0
                     ? ""
-                    : localSensorCombo.SelectedItem as string ?? "";
+                    : (localSensorCombo.SelectedItem as HardwareChoice)?.Id ?? localSensorCombo.SelectedItem as string ?? "";
                 item.SensorOverride = string.IsNullOrEmpty(selected) ? null : selected;
                 EvaluateDirty();
             };
@@ -942,6 +970,7 @@ namespace GGSystemMonitor
                 lblNotPlaying.Top    = detailTop + 4;
                 txtNotPlaying.Top    = detailTop;
 
+                deviceCombo.Top = detailTop + 28;
                 chkSkipNotPlaying.Top = detailTop + 27;
                 UpdateHeight();
             }
@@ -1086,7 +1115,7 @@ namespace GGSystemMonitor
             };
             _cpuAvBlockedLabel = new Label
             {
-                Text      = "Application was blocked by AV",
+                Text      = "CPU temperature unavailable",
                 AutoSize  = true,
                 Location  = new Point(0, 4),
                 ForeColor = Color.FromArgb(205, 35, 35),
@@ -2077,8 +2106,7 @@ namespace GGSystemMonitor
                 "Times New Roman",
                 "Franklin Gothic Medium"
             };
-            var installed  = new System.Drawing.Text.InstalledFontCollection()
-                .Families.Select(f => f.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var installed = InstalledFontNames();
             return candidates.Where(f => installed.Contains(f)).ToArray();
         }
 
@@ -2117,7 +2145,7 @@ namespace GGSystemMonitor
             };
             header.Controls.Add(new Label
             {
-                Text      = "CPU Temperature Access Blocked",
+                Text      = "CPU Sensor Diagnostics",
                 Location  = new Point(pad, 14),
                 Size      = new Size(W - pad * 2, 24),
                 ForeColor = Color.White,
@@ -2224,11 +2252,11 @@ namespace GGSystemMonitor
 
             AddCard(
                 "Why this happens",
-                "CPU temperature sensors require low-level hardware access. Some antivirus products can false-flag that access and block GGSystemMonitor.exe from reading CPU sensor data. Windows Defender is the most common source of this false positive; premium antivirus products such as Norton usually do not trigger it.",
+                "CPU sensor access can fail because of missing privileges, unsupported hardware, missing driver prerequisites, or security software. A zero or missing reading alone does not establish that antivirus blocked the application.",
                 Color.FromArgb(205, 35, 35));
             AddCard(
                 "How to fix it",
-                "If Windows Defender is blocking the app, add an exclusion for GGSystemMonitor.exe in Windows Security. After the exclusion is added, restart the monitor so the sensor library can access CPU temperatures again.",
+                "Check Diagnostics for library and sensor information. Run the monitor as administrator. The full release installer automatically installs the PawnIO prerequisite; rerun setup from the complete ZIP if it is missing. Review security protection history for a specific blocked component. Only allow files after verifying their source; exclusions are not a guaranteed fix. Do not disable Memory Integrity or antivirus protection.",
                 Color.FromArgb(0, 120, 215));
             AddCard(
                 "What still works",
@@ -2803,6 +2831,7 @@ namespace GGSystemMonitor
             PopulateList(_bottomList, s.BottomLineItems ?? new List<LineItem> { new LineItem { Type = "GpuTemperature" } });
             _rotationNud.Value = Clamp(_rotationNud, s.RotationIntervalMs);
 
+            if (_outputProfile != null) _outputProfile.SelectedIndex = s.OutputProfile == "arctis" ? 1 : s.OutputProfile == "gamedac" ? 2 : 0;
             // General
             _capsLockCheck.Checked   = s.ShowCapsLockIndicator;
             _showUpdateCheck.Checked = s.ShowUpdateNotifications;
@@ -2979,12 +3008,14 @@ namespace GGSystemMonitor
                     new JProperty("WarnTemp",               item.WarnTemp),
                     new JProperty("CritTemp",               item.CritTemp),
                     new JProperty("SensorOverride",         item.SensorOverride),
+                    new JProperty("HardwareId", item.HardwareId),
                     new JProperty("GpuPasteMonitoring",     item.GpuPasteMonitoring),
                     new JProperty("GpuPasteGapTemp",        item.GpuPasteGapTemp),
                     new JProperty("WeatherLocation",        item.WeatherLocation)
                 ))
             );
 
+            jo["OutputProfile"] = _outputProfile?.SelectedIndex == 1 ? "arctis" : _outputProfile?.SelectedIndex == 2 ? "gamedac" : "keyboard";
             jo["GGEngineCorePropsPath"]   = _ggPathBox.Text;
             jo["ShowCapsLockIndicator"]   = _capsLockCheck.Checked;
             jo["ShowUpdateNotifications"] = _showUpdateCheck.Checked;
@@ -2996,8 +3027,7 @@ namespace GGSystemMonitor
             string chosenFont = _oledFontCombo.SelectedIndex == 0 ? "" : _oledFontCombo.SelectedItem?.ToString() ?? "";
             if (!string.IsNullOrEmpty(chosenFont))
             {
-                var installed = new System.Drawing.Text.InstalledFontCollection()
-                    .Families.Select(f => f.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var installed = InstalledFontNames();
                 if (!installed.Contains(chosenFont))
                 {
                     _oledFontCombo.SelectedIndex = 0;
@@ -3046,6 +3076,7 @@ namespace GGSystemMonitor
             _showUpdateCheck.Checked     = d.ShowUpdateNotifications;
             _ggPathBox.Text              = d.GGEngineCorePropsPath;
             _oledFontCombo.SelectedIndex = 0;
+            if (_outputProfile != null) _outputProfile.SelectedIndex = 0;
             _loading = false;
             SaveSettings();
         }
@@ -3111,8 +3142,7 @@ namespace GGSystemMonitor
             if (cpuSel != null) PopulateCpuExtPanel(cpuSel);
             var gpuSel = GetSelectedGpuItem();
             if (gpuSel != null) PopulateGpuExtPanel(gpuSel);
-            _baseline = CaptureBaseline();
-            ResetDirty();
+            EvaluateDirty();
         }
 
         private void RefreshCpuTemperatureHealthDisplay()
@@ -3139,13 +3169,14 @@ namespace GGSystemMonitor
                 string updatedRaw = status["UpdatedUtc"]?.ToString();
                 if (DateTime.TryParse(updatedRaw, null,
                     System.Globalization.DateTimeStyles.RoundtripKind,
-                    out DateTime updatedUtc) &&
-                    DateTime.UtcNow - updatedUtc.ToUniversalTime() > TimeSpan.FromSeconds(30))
+                    out DateTime updatedUtc) == false ||
+                    DateTime.UtcNow - updatedUtc.ToUniversalTime() > TimeSpan.FromSeconds(35) ||
+                    updatedUtc.ToUniversalTime() - DateTime.UtcNow > TimeSpan.FromSeconds(5))
                 {
                     return false;
                 }
 
-                JToken explicitBlocked = status["CpuTemperatureBlockedByAv"];
+                JToken explicitBlocked = status["CpuTemperatureUnavailable"] ?? status["CpuTemperatureBlockedByAv"];
                 if (explicitBlocked != null && explicitBlocked.Type == JTokenType.Boolean)
                 {
                     blocked = explicitBlocked.Value<bool>();
@@ -3223,22 +3254,12 @@ namespace GGSystemMonitor
         {
             if (IsMonitorRunning())
             {
-                int currentPid;
-                using (var current = Process.GetCurrentProcess())
-                    currentPid = current.Id;
-                var processes = Process.GetProcessesByName("GGSystemMonitor");
-                foreach (var p in processes)
+                try
                 {
-                    try
-                    {
-                        if (p.Id != currentPid) p.Kill();
-                    }
-                    catch { }
-                    finally
-                    {
-                        try { p.Dispose(); } catch { }
-                    }
+                    using (var stop = System.Threading.EventWaitHandle.OpenExisting(Program.MonitorStopEventName)) stop.Set();
                 }
+                catch (Exception ex) { MessageBox.Show(this, "Could not stop the monitor: " + ex.Message, "Monitor"); }
+
             }
             else
             {
@@ -3261,29 +3282,8 @@ namespace GGSystemMonitor
 
         private bool IsMonitorRunning()
         {
-            int currentPid;
-            using (var current = Process.GetCurrentProcess())
-                currentPid = current.Id;
-            var processes = Process.GetProcessesByName("GGSystemMonitor");
-            try
-            {
-                foreach (var p in processes)
-                {
-                    try
-                    {
-                        if (p.Id != currentPid) return true;
-                    }
-                    catch { }
-                }
-                return false;
-            }
-            finally
-            {
-                foreach (var p in processes)
-                {
-                    try { p.Dispose(); } catch { }
-                }
-            }
+            try { using (var stop = System.Threading.EventWaitHandle.OpenExisting(Program.MonitorStopEventName)) return true; }
+            catch { return false; }
         }
 
         // ----------------------------------------------------------------
@@ -3292,219 +3292,36 @@ namespace GGSystemMonitor
         private void OnUninstallClick(object sender, EventArgs e)
         {
             if (_uninstallDialogOpen) return;
-            string installPs1 = Path.Combine(AppContext.BaseDirectory, "Install.ps1");
-            if (!File.Exists(installPs1))
+            string script = Path.Combine(AppContext.BaseDirectory, "Install.ps1");
+            string worker = Path.Combine(AppContext.BaseDirectory, "UninstallWorker.ps1");
+            if (!File.Exists(script) || !File.Exists(worker))
             {
-                MessageBox.Show(
-                    "Install.ps1 was not found in the installation folder.\n" +
-                    "You can uninstall manually via Add/Remove Programs.",
-                    "Uninstall Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(this, "Uninstaller files are missing. Repair the installation first.", "Uninstall Failed",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
-
-            bool uninstallComplete = false;
-
-            using (var dlg = new Form())
+            if (MessageBox.Show(this, "Uninstall GGSystemMonitor and remove its settings? Shared prerequisites will be retained.",
+                "Uninstall GGSystemMonitor", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            _uninstallDialogOpen = true;
+            try
             {
-                dlg.Text            = "Uninstall GGSystemMonitor";
-                dlg.ClientSize      = new Size(420, 210);
-                dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
-                dlg.StartPosition   = FormStartPosition.CenterParent;
-                dlg.MaximizeBox     = false;
-                dlg.MinimizeBox     = false;
-                dlg.ShowInTaskbar   = false;
-                dlg.BackColor       = Color.FromArgb(245, 245, 248);
-                dlg.Font            = new Font("Segoe UI", 9f);
-                dlg.Icon            = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-
-                var iconLbl = new Label
+                var info = new ProcessStartInfo
                 {
-                    Text      = "!",
-                    Font      = new Font("Segoe UI", 22f, FontStyle.Bold),
-                    ForeColor = Color.FromArgb(180, 40, 40),
-                    AutoSize  = true,
-                    Location  = new Point(16, 14)
+                    FileName = "powershell.exe",
+                    Arguments = "-NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File " + (char)34 + script + (char)34 + " -Uninstall",
+                    UseShellExecute = true,
+                    WindowStyle = ProcessWindowStyle.Hidden,
+                    Verb = "runas"
                 };
-
-                var msgLbl = new Label
-                {
-                    Text      = "Are you sure you want to uninstall GGSystemMonitor?\n\n" +
-                                "This will stop the application, remove the scheduled\n" +
-                                "task, shortcuts, and delete the installation folder.",
-                    AutoSize  = false,
-                    Size      = new Size(344, 78),
-                    Location  = new Point(60, 10),
-                    ForeColor = Color.FromArgb(30, 30, 40)
-                };
-
-                var progressBar = new ProgressBar
-                {
-                    Location = new Point(16, 102),
-                    Size     = new Size(388, 16),
-                    Minimum  = 0,
-                    Maximum  = 100,
-                    Value    = 0,
-                    Style    = ProgressBarStyle.Continuous,
-                    Visible  = false
-                };
-
-                var statusLbl = new Label
-                {
-                    Text      = "Removing GGSystemMonitor...",
-                    AutoSize  = true,
-                    Location  = new Point(16, 123),
-                    ForeColor = Color.FromArgb(90, 90, 100),
-                    Visible   = false
-                };
-
-                var footer = new Panel
-                {
-                    Dock      = DockStyle.Bottom,
-                    Height    = 50,
-                    BackColor = Color.FromArgb(228, 228, 236)
-                };
-
-                var btnConfirm = new Button
-                {
-                    Text      = "Uninstall",
-                    Size      = new Size(100, 30),
-                    Location  = new Point(420 - 100 - 8, 10),
-                    FlatStyle = FlatStyle.Flat,
-                    BackColor = Color.FromArgb(180, 40, 40),
-                    ForeColor = Color.White,
-                    Font      = new Font("Segoe UI", 9f, FontStyle.Bold)
-                };
-                btnConfirm.FlatAppearance.BorderSize = 0;
-
-                var btnCancel = new Button
-                {
-                    Text      = "Cancel",
-                    Size      = new Size(88, 30),
-                    Location  = new Point(420 - 100 - 8 - 88 - 6, 10),
-                    FlatStyle = FlatStyle.Flat,
-                    BackColor = Color.FromArgb(245, 245, 248)
-                };
-                btnCancel.FlatAppearance.BorderColor = Color.FromArgb(185, 185, 198);
-
-                footer.Controls.Add(btnConfirm);
-                footer.Controls.Add(btnCancel);
-                dlg.Controls.Add(iconLbl);
-                dlg.Controls.Add(msgLbl);
-                dlg.Controls.Add(progressBar);
-                dlg.Controls.Add(statusLbl);
-                dlg.Controls.Add(footer);
-
-                System.Windows.Forms.Timer pollTimer = null;
-                string doneFile = Path.Combine(Path.GetTempPath(), "GGSystemMonitor_uninstall.tmp");
-
-                btnCancel.Click += (s2, e2) => { pollTimer?.Stop(); dlg.Close(); };
-
-                btnConfirm.Click += (s2, e2) =>
-                {
-                    btnConfirm.Enabled   = false;
-                    btnCancel.Enabled    = false;
-                    btnConfirm.BackColor = Color.FromArgb(160, 160, 165);
-                    btnCancel.BackColor  = Color.FromArgb(210, 210, 215);
-                    progressBar.Visible  = true;
-                    statusLbl.Visible    = true;
-                    dlg.Refresh();
-
-                    if (File.Exists(doneFile)) { try { File.Delete(doneFile); } catch { } }
-
-                    try
-                    {
-                        int currentPid;
-                        using (var current = Process.GetCurrentProcess())
-                            currentPid = current.Id;
-                        Process.Start(new ProcessStartInfo
-                        {
-                            FileName        = "powershell.exe",
-                            Arguments       = $"-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden" +
-                                              $" -File \"{installPs1}\" -Uninstall -DoneFile \"{doneFile}\"" +
-                                              $" -ExcludePid {currentPid}",
-                            UseShellExecute = true,
-                            Verb            = "runas"
-                        });
-                    }
-                    catch
-                    {
-                        btnConfirm.Enabled   = true;
-                        btnCancel.Enabled    = true;
-                        btnConfirm.BackColor = Color.FromArgb(180, 40, 40);
-                        btnCancel.BackColor  = Color.FromArgb(245, 245, 248);
-                        progressBar.Visible  = false;
-                        statusLbl.Visible    = false;
-                        return;
-                    }
-
-                    int elapsed = 0;
-                    pollTimer = new System.Windows.Forms.Timer { Interval = 300 };
-                    pollTimer.Tick += (s3, e3) =>
-                    {
-                        elapsed += 300;
-                        try
-                        {
-                            if (!File.Exists(doneFile)) return;
-                            string content = File.ReadAllText(doneFile).Trim();
-
-                            if (int.TryParse(content, out int pct))
-                            {
-                                progressBar.Value = Math.Max(progressBar.Value, Math.Min(100, pct));
-                                return;
-                            }
-                            if (content == "DONE")
-                            {
-                                pollTimer.Stop();
-                                progressBar.Value = 100;
-                                dlg.Refresh();
-                                try { File.Delete(doneFile); } catch { }
-                                var closeTimer = new System.Windows.Forms.Timer { Interval = 400 };
-                                closeTimer.Tick += (s4, e4) =>
-                                {
-                                    closeTimer.Stop(); closeTimer.Dispose();
-                                    uninstallComplete = true;
-                                    dlg.Close();
-                                };
-                                closeTimer.Start();
-                                return;
-                            }
-                            if (content.StartsWith("ERROR:"))
-                            {
-                                pollTimer.Stop();
-                                try { File.Delete(doneFile); } catch { }
-                                MessageBox.Show(content.Substring(6), "Uninstall Failed",
-                                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-                                dlg.Close();
-                                return;
-                            }
-                        }
-                        catch { }
-
-                        if (elapsed > 90000)
-                        {
-                            pollTimer.Stop();
-                            MessageBox.Show(
-                                "Uninstall timed out. Please try again or use Add/Remove Programs.",
-                                "Uninstall Timeout", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                            dlg.Close();
-                        }
-                    };
-                    pollTimer.Start();
-                };
-
-                dlg.FormClosed += (s2, e2) => { pollTimer?.Stop(); pollTimer?.Dispose(); _uninstallDialogOpen = false; };
-                _uninstallDialogOpen = true;
-                dlg.ShowDialog(this);
+                using (var process = Process.Start(info)) { }
+                // A standalone worker owns progress and completion; release this EXE.
+                Close();
             }
-
-            if (uninstallComplete)
+            catch (Exception ex)
             {
-                MessageBox.Show(
-                    "GGSystemMonitor has been successfully uninstalled.",
-                    "Uninstall Complete",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
-                this.Close();
+                _uninstallDialogOpen = false;
+                MessageBox.Show(this, "Uninstall could not start: " + ex.Message, "Uninstall Failed",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -3592,6 +3409,8 @@ namespace GGSystemMonitor
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
+            _trayIcon?.Dispose();
+            _diagnosticsTimer?.Dispose();
             _statusTimer?.Stop();
             _statusTimer?.Dispose();
             _weatherValidationTimer?.Stop();

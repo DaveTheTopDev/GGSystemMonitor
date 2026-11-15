@@ -7,13 +7,13 @@
 **Bring hardware sensor data and live widgets to your SteelSeries keyboard OLED screen.**  
 A fully automated, installer-based Windows app that hooks into SteelSeries GG software and displays live system metrics, weather, media, time, and more - right on your Apex Pro's OLED display.
 
-[![Release](https://img.shields.io/badge/release-v3.1.0-brightgreen?style=for-the-badge)](https://github.com/DaveTheTopDev/GGSystemMonitor/releases)
+[![Release](https://img.shields.io/badge/release-v3.2.0-brightgreen?style=for-the-badge)](https://github.com/DaveTheTopDev/GGSystemMonitor/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows-blue?style=for-the-badge&logo=windows)](https://github.com/DaveTheTopDev/GGSystemMonitor)
 [![Language](https://img.shields.io/badge/language-C%23%20.NET-purple?style=for-the-badge&logo=dotnet)](https://github.com/DaveTheTopDev/GGSystemMonitor)
-[![RAM](https://img.shields.io/badge/memory-~16%20MB-orange?style=for-the-badge)](https://github.com/DaveTheTopDev/GGSystemMonitor)
+[![RAM](https://img.shields.io/badge/memory-lightweight-orange?style=for-the-badge)](https://github.com/DaveTheTopDev/GGSystemMonitor)
 [![License](https://img.shields.io/badge/license-GPL%203.0-gray?style=for-the-badge)](LICENSE)
 
-### [⬇️ Download Latest Release](https://github.com/DaveTheTopDev/GGSystemMonitor/releases/download/3.1.0/GGSystemMonitor-V3.1.0.zip)
+### [⬇️ Download Latest Release](https://github.com/DaveTheTopDev/GGSystemMonitor/releases/download/3.2.0/GGSystemMonitor-V3.2.0.zip)
 
 </div>
 
@@ -29,9 +29,9 @@ A fully automated, installer-based Windows app that hooks into SteelSeries GG so
 2. **Run** `install.bat` inside the extracted folder - the installer will launch and guide you through setup
 3. When prompted, **accept the UAC dialog** to grant administrator rights (required for CPU temperature reading)
 4. Choose your **install path**, select desired shortcuts, and click **Install**
-5. The application will **launch automatically on Windows startup** - no further configuration needed
+5. Setup installs missing **PawnIO** and **.NET Framework** components from the offline bundle. Restart if requested. Automatic startup is enabled only if you select it.
 
-> ✅ That's it! The app runs silently in the background (~16 MB RAM) and your OLED will start displaying widgets automatically.
+> ✅ No separate prerequisite downloads are needed. Keep the extracted bundle together; SteelSeries GG must already be installed.
 
 ---
 
@@ -41,11 +41,35 @@ Updating is simple:
 
 1. **Download** the latest release zip from the [Releases](https://github.com/DaveTheTopDev/GGSystemMonitor/releases) page and extract it
 2. **Run** `install.bat` inside the extracted folder - it will automatically update over your existing installation
-3. Done!
+3. Setup preserves settings and startup/shortcut choices. Settings opens after setup closes unless a restart is required.
+
+The same version offers **Repair** to refresh application files without resetting settings.
 
 ---
 
-## What's New in v3.1.0
+## What's New in v3.2.0
+
+Version 3.2.0 focuses on hardware selection, standalone setup, diagnostics, and reliability.
+
+| | Change |
+|---|---|
+| 🖥 | **Device selection** - select the CPU/GPU for temperature widgets and GPU for utilization widgets |
+| 🌡 | **Independent sensor IDs** - each widget keeps its own selection; unavailable explicit selections are not silently replaced |
+| 📦 | **Offline prerequisites** - official PawnIO 2.2.0 and .NET Framework 4.8 installers are bundled and installed automatically when needed |
+| 🔎 | **Diagnostics** - hardware inventory, support-report export, and an OLED test pattern |
+| 🎧 | **Experimental device profiles** - Arctis Pro Wireless and GameDAC resolution targets; physical-device validation is still required |
+| 🪟 | **Settings access** - single-instance activation, tray controls, and graceful monitor stop |
+| 🛠 | **Installer fixes** - detached hidden launcher, preserved update preferences, same-version repair, and post-update settings launch |
+| 🗑 | **Verified uninstall** - temporary progress worker releases EXE locks and verifies removal before success; shared prerequisites are retained |
+| 🔤 | **Unicode-safe scrolling** - custom-font scrolling no longer splits surrogate-pair characters |
+| 📉 | **Performance improvements** - bounded caches/logs, disposed resources, and no forced working-set trimming |
+| 🩺 | **Accurate sensor diagnostics** - missing CPU readings no longer automatically claim antivirus blocking |
+
+> **Test candidate:** External OLED devices, affected CPU systems, and Apex 7 cold-boot lighting still need owner validation. See [test results](TEST-RESULTS.md).
+
+---
+
+## Previous Update - v3.1.0
 
 Version 3.1.0 is a feature update that adds new widgets, drastically improves the UI, and refines how temperature settings are configured.
 
@@ -59,7 +83,7 @@ Version 3.1.0 is a feature update that adds new widgets, drastically improves th
 | 🔤 | **Custom OLED fonts** - select from custom fonts in General settings to change how text is rendered on the OLED |
 | 🧠 | **APU support** - integrated graphics on AMD APUs are now supported |
 | 🌡️ | **Per-widget temperature sensor selection** - choose exactly which CPU/GPU sensor each temperature widget reads from |
-| 🛡️ | **Antivirus detection** - automatically detects when an antivirus is blocking access to CPU temperature sensors and suggests a fix |
+| 🛡️ | **Sensor diagnostics** - reports missing CPU readings and helps investigate possible causes |
 | 🗂️ | **Temperature tab removed** - all temperature-related settings are now configured directly inside each widget's settings, where they belong |
 | 🐛 | **Bug fixes** - various stability and compatibility fixes throughout |
 
@@ -78,6 +102,15 @@ Version 3.1.0 is a feature update that adds new widgets, drastically improves th
 
 ## Features
 
+### Verified Uninstall
+Use Uninstall in Settings or Windows Installed Apps. Settings exits to release its EXE.
+A separate progress window stays open until the application folder, shortcuts, startup task,
+and registration have been verified removed. Locked files produce an error rather than
+false success. Shared PawnIO and .NET prerequisites are retained.
+
+---
+
+
 ### Fully Automated Installer
 The installer handles **everything** automatically:
 - Choose your install directory (defaults to `%LocalAppData%`)
@@ -85,7 +118,7 @@ The installer handles **everything** automatically:
 - **Auto-starts with Windows** - no manual Task Scheduler configuration needed
 - A one-time UAC prompt grants the required administrator privileges to read hardware sensors
 
-> ⚠️ **Note:** Administrator rights are required to read CPU temperature sensors. You may decline the UAC prompt and the app will still install and run, but the CPU temperature sensor will display `N/A`.
+> **Note:** Setup requires administrator permission. Declining setup UAC cancels installation. Sensor availability also depends on hardware support and system policy.
 
 ---
 
@@ -219,25 +252,14 @@ The **General** tab includes:
 
 ---
 
-## ⚠️ CPU Temperature Showing `N/A` or `0.0°C`?
+## CPU temperature unavailable?
+A zero or missing temperature does not prove antivirus blocking. Check Diagnostics for
+hardware inventory, sensor state, elevation and the PawnIO service.
+The standalone release installer bundles and installs PawnIO and .NET automatically when needed. No separate prerequisite download is necessary. A restart can be required; Windows security policies are not bypassed.
+Review protection history for specific blocked components. Do not disable antivirus or
+Memory Integrity. Exclusions do not fix every failure. Other widgets remain available.
 
-If your CPU temperature widget is showing `N/A` or `0.0°C`, the cause is almost always **an antivirus blocking access** to the CPU temperature sensor.
-
-CPU temperature sensors are typically flagged as false positives by antivirus software because they require kernel-level access to read. Premium antivirus suites (such as **Norton**) usually don't flag them, but **Windows Defender** very commonly does on its own.
-
-**GGSystemMonitor will automatically detect this and prompt you with a suggested fix.** If you want to fix it manually:
-
-### Fix for Windows Defender
-1. Open **Windows Security** → **Virus & threat protection**
-2. Under "Virus & threat protection settings" click **Manage settings**
-3. Scroll down to **Exclusions** and click **Add or remove exclusions**
-4. Click **Add an exclusion** → **File**
-5. Select the **GGSystemMonitor.exe** file in your install directory
-6. Restart GGSystemMonitor
-
-After the exclusion is added, the CPU temperature sensor will work normally.
-
-> ℹ️ If you prefer not to add the exclusion, the application will still work completely fine - **only the CPU temperature widget will be unavailable**. All other widgets (GPU temp, usage, RAM, weather, media, time, date, etc.) will continue to work without issue.
+See [3.2.0 candidate notes](RELEASE-NOTES.md) for verification and experimental device support.
 
 ---
 

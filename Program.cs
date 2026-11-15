@@ -1,4 +1,4 @@
-﻿using LibreHardwareMonitor.Hardware;
+using LibreHardwareMonitor.Hardware;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System;
@@ -21,13 +21,13 @@ using JsonSerializer = System.Text.Json.JsonSerializer;
 
 namespace GGSystemMonitor
 {
-    internal class Program
+    internal partial class Program
     {
         // Configuration
         private const string APP_NAME = "CUSTOM_SYSTEM_MONITOR";
         private const int DEFAULT_SCREEN_COLS = 15;
         private const int OLED_IMAGE_WIDTH = 128;
-        private const int OLED_IMAGE_HEIGHT = 40;
+        private static int OLED_IMAGE_HEIGHT => settings?.OutputProfile == "arctis" ? 48 : settings?.OutputProfile == "gamedac" ? 52 : 40;
         private const int OLED_IMAGE_INDICATOR_COL_WIDTH = 9;
         private const string DEFAULT_CAPS_LOCK_INDICATOR = "🡅";
         private const string CUSTOM_FONT_CAPS_LOCK_INDICATOR = "↑";
@@ -36,12 +36,13 @@ namespace GGSystemMonitor
         private static int SCREEN_COLS = 15;
         private const int OLED_UPDATE_INTERVAL_MS = 250;
         private const string EVENT_NAME = "SYS_MONITOR";
-        internal const string VERSION = "3.1.0";
+        internal const string VERSION = "3.2.0";
         private const string GITHUB_REPO = "DaveTheTopDev/GGSystemMonitor";
-        private static HttpClient http = new HttpClient();
+        private static HttpClient http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        private static readonly HttpClient GgHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
         private static readonly string MonitorStatusFilePath =
             Path.Combine(AppContext.BaseDirectory, "monitor_status.json");
-        private static readonly int[] OledBlankImageData = Enumerable.Repeat(0, OLED_IMAGE_WIDTH * OLED_IMAGE_HEIGHT / 8).ToArray();
+        private static int[] OledBlankImageData => new int[OLED_IMAGE_WIDTH * OLED_IMAGE_HEIGHT / 8];
         private static readonly object OledFontMeasureLock = new object();
         private static readonly Dictionary<string, int> OledFontWidthCache = new Dictionary<string, int>();
         private static readonly Dictionary<string, float> OledFontAdvanceCache = new Dictionary<string, float>();
@@ -125,10 +126,7 @@ namespace GGSystemMonitor
         {
             if (args.Length > 0 && args[0].Equals("--settings", StringComparison.OrdinalIgnoreCase))
             {
-                Application.EnableVisualStyles();
-                Application.SetCompatibleTextRenderingDefault(false);
-                Task.Run(() => CheckForUpdates());
-                Application.Run(new SettingsForm());
+                RunSettingsWindow();
                 return;
             }
 
@@ -150,14 +148,14 @@ namespace GGSystemMonitor
                 catch { /* User declined UAC - Continue without admin (CPU temp will read N/A) */ }
             }
 
+            if (!AcquireMonitorInstance()) return;
             AppDomain.CurrentDomain.ProcessExit += (s, e) =>
             {
-                try { SendToOled("GGSystemMonitor", "Waiting..."); } catch { }
                 try { _computer?.Close(); } catch { }
             };
             Microsoft.Win32.SystemEvents.SessionEnding += (s, e) =>
             {
-                try { SendToOled("GGSystemMonitor", "Waiting..."); } catch { }
+                try { _stopSignal?.Set(); } catch { }
             };
 
             try
@@ -169,7 +167,7 @@ namespace GGSystemMonitor
                     IsGpuEnabled = true,
                     IsMemoryEnabled = true
                 };
-                _computer.Open();
+                try { _computer.Open(); } catch (Exception ex) { _sensorError = ex.GetType().Name + ": " + ex.Message; }
 
                 // Give LHM a short moment to initialize internal polling
                 Thread.Sleep(500);
@@ -201,28 +199,12 @@ namespace GGSystemMonitor
                     }
                 }
 
-                // Cache detected hardware names and sensor lists for the settings UI
-                try
-                {
-                    cpuHardware?.Update();
-                    gpuHardware?.Update();
-                    var cpuSensors = cpuHardware?.Sensors
-                        .Where(s => s.SensorType == SensorType.Temperature && s.Name != null)
-                        .Select(s => s.Name)
-                        .ToArray() ?? Array.Empty<string>();
-                    var gpuSensors = gpuHardware?.Sensors
-                        .Where(s => s.SensorType == SensorType.Temperature && s.Name != null)
-                        .Select(s => s.Name)
-                        .ToArray() ?? Array.Empty<string>();
-                    var hwInfo = new JObject(
-                        new JProperty("CpuName", cpuHardware?.Name ?? ""),
-                        new JProperty("GpuName", gpuHardware?.Name ?? ""),
-                        new JProperty("CpuTempSensors", new JArray(cpuSensors)),
-                        new JProperty("GpuTempSensors", new JArray(gpuSensors))
-                    );
-                    File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "hardware.json"), hwInfo.ToString(Formatting.None));
-                }
-                catch { }
+                memoryHardware = _computer.Hardware.Where(h => h.HardwareType == HardwareType.Memory).OrderBy(h => h.Name.IndexOf("virtual", StringComparison.OrdinalIgnoreCase) >= 0 ? 1 : 0).FirstOrDefault();
+                gpuHardware = ChooseGpu(_computer.Hardware);
+
+                // Independent failures must not prevent the settings inventory from being published.
+                PollHardware();
+                try { WriteHardwareInventory(); } catch (Exception ex) { AppendLog("Hardware inventory: " + ex.Message + Environment.NewLine); }
 
                 // --- Initialize Settings.json file ---
                 settings = SettingsManager.LoadSettings();
@@ -230,32 +212,17 @@ namespace GGSystemMonitor
                 RefreshWidgetFlags();
 
                 FileSystemWatcher watcher = new FileSystemWatcher(AppContext.BaseDirectory, "settings.json");
-                watcher.Changed += (s, e) =>
-                {
-                    try
-                    {
-                        Thread.Sleep(100); // brief delay for file lock
-                        bool wasFontMode = _oledFont != null;
-                        settings = SettingsManager.LoadSettings();
-                        UpdateOledFont();
-                        RefreshWidgetFlags();
-                        if (_hasWeatherWidget)
-                            _weatherRefreshMs = 0; // trigger RefreshAllWeather on next tick
-                        if (baseUrl != null)
-                        {
-                            // Re-register event when switching between text and image mode
-                            if (wasFontMode != (_oledFont != null)) RegisterEvent();
-                            BindEvent();
-                            BuildAndSendDisplay();
-                        }
-                    }
-                    catch { }
-                };
+                watcher.Changed += (sender, change) => _reloadSettings = true;
+                watcher.Created += (sender, change) => _reloadSettings = true;
+                watcher.Renamed += (sender, change) => _reloadSettings = true;
                 watcher.EnableRaisingEvents = true;
 
                 // Wait for GG Engine to be available (polls until coreProps.json is present and readable)
-                while (baseUrl == null)
+                while (baseUrl == null && !MonitorStopRequested())
                 {
+                    PollHardware();
+                    cachedCpuTemp = ReadTemperature(cpuHardware, null);
+                    WriteMonitorStatus();
                     GetGGAddress();
                     if (baseUrl == null) Thread.Sleep(2000);
                 }
@@ -280,10 +247,11 @@ namespace GGSystemMonitor
                 var tickSw = System.Diagnostics.Stopwatch.StartNew();
 
                 // Main loop
-                while (true)
+                while (!MonitorStopRequested())
                 {
                     try
                     {
+                        ApplyPendingSettings();
                         // Measure actual elapsed time so all timers run at real wall-clock speed
                         // regardless of Thread.Sleep precision (~15ms on Windows default timer resolution)
                         int tickMs = (int)tickSw.ElapsedMilliseconds;
@@ -296,10 +264,10 @@ namespace GGSystemMonitor
                         {
                             int cpuInterval = GetMinPollInterval("cputemperature");
                             _cpuPollMs = cpuInterval;
-                            string cpuSensor = GetFirstSensorOverride("cputemperature");
-                            double? cpuTempRead = null;
-                            try { cpuTempRead = GetCpuTemperature(cpuSensor); } catch { }
-                            cachedCpuTemp = cpuTempRead;
+                            PollHardware();
+                            cpuHardware = ResolveHardware(null, true);
+                            gpuHardware = ChooseGpu(_computer.Hardware);
+                            cachedCpuTemp = ReadTemperature(cpuHardware, null);
                             try { cachedCpuUsage = GetCpuUsage(); } catch { cachedCpuUsage = null; }
                             try { (cachedRamUsed, cachedRamTotal) = GetRamUsage(); }
                             catch { cachedRamUsed = null; cachedRamTotal = null; }
@@ -311,15 +279,16 @@ namespace GGSystemMonitor
                         {
                             int gpuInterval = GetMinPollInterval("gputemperature");
                             _gpuPollMs = gpuInterval;
-                            string gpuSensor = GetFirstSensorOverride("gputemperature");
-                            cachedGpuTemp  = GetGpuTemperature(gpuSensor);
-                            cachedGpuUsage = GetGpuUsage();
+                            PollHardware();
+                            cachedGpuTemp = ReadTemperature(gpuHardware, null);
+                            cachedGpuUsage = ReadLoad(gpuHardware);
 
                             // GPU thermal paste monitoring — use the currently-displayed GPU temp item's settings
                             bool pasteWarnFromHW = false;
                             var activeGpuItem = GetActiveGpuItem();
                             if (activeGpuItem != null && activeGpuItem.GpuPasteMonitoring)
                             {
+                                SelectWidgetHardware(activeGpuItem);
                                 cachedHotspot = GetGpuHotSpot();
                                 if (cachedHotspot.HasValue && cachedGpuTemp.HasValue &&
                                     cachedHotspot - cachedGpuTemp > activeGpuItem.GpuPasteGapTemp)
@@ -423,7 +392,7 @@ namespace GGSystemMonitor
                                     if (baseUrl != null)
                                     {
                                         _ggConnected = true;
-                                        File.AppendAllText("GGSystemMonitor.log", DateTime.Now + " - GG Engine reconnected." + Environment.NewLine);
+                                        AppendLog( DateTime.Now + " - GG Engine reconnected." + Environment.NewLine);
                                     }
                                     else
                                     {
@@ -468,23 +437,26 @@ namespace GGSystemMonitor
                     catch (Exception ex)
                     {
                         // Log exceptions to file for troubleshooting
-                        File.AppendAllText("GGSystemMonitor.log", DateTime.Now + " - Error: " + ex + Environment.NewLine);
+                        AppendLog( DateTime.Now + " - Error: " + ex + Environment.NewLine);
                     }
                     Thread.Sleep(10);
                 }
             }
             catch (Exception ex)
             {
-                File.AppendAllText("GGSystemMonitor.log", DateTime.Now + " - Fatal: " + ex + Environment.NewLine);
+                AppendLog( DateTime.Now + " - Fatal: " + ex + Environment.NewLine);
             }
             finally
             {
+                try { PostJsonText("/stop_game", "{\"game\":\"" + APP_NAME + "\"}"); } catch { }
                 try { _computer?.Close(); } catch { }
+                _monitorMutex?.Dispose();
+                _stopSignal?.Dispose();
             }
         }
         public class AppSettings
         {
-            public const int CurrentSettingsVersion = 1;
+            public const int CurrentSettingsVersion = 2;
             public int SettingsVersion { get; set; } = 0;
             public string GGEngineCorePropsPath { get; set; } = @"C:/ProgramData/SteelSeries/SteelSeries Engine 3/coreProps.json";
             public bool ShowCapsLockIndicator { get; set; } = true;
@@ -500,6 +472,7 @@ namespace GGSystemMonitor
             public List<LineItem> BottomLineItems { get; set; } = new List<LineItem> { new LineItem { Type = "GpuTemperature" } };
             public int RotationIntervalMs { get; set; } = 3000;
             public string OledFont        { get; set; } = "";
+            public string OutputProfile { get; set; } = "keyboard";
         }
         public static class SettingsManager
         {
@@ -554,7 +527,8 @@ namespace GGSystemMonitor
                         jo["SettingsVersion"] = 1;
                         ver = 1;
                     }
-                    // Future: if (ver < 2) { jo["NewField"] = defaultValue; jo["SettingsVersion"] = ver = 2; }
+                    if (ver < 2) { jo["SettingsVersion"] = ver = 2; }
+                    // Missing optional HardwareId/OutputProfile fields retain their defaults.
                     settings.SettingsVersion = ver;
                     File.WriteAllText(SettingsFilePath, jo.ToString(Formatting.Indented));
                 }
@@ -580,6 +554,7 @@ namespace GGSystemMonitor
             public string WarnTemp { get; set; } = "AUTO";
             public string CritTemp { get; set; } = "AUTO";
             public string SensorOverride { get; set; } = null;
+            public string HardwareId { get; set; } = "";
             public bool GpuPasteMonitoring { get; set; } = true;
             public int GpuPasteGapTemp { get; set; } = 15;
             public string WeatherLocation { get; set; } = "";
@@ -727,7 +702,7 @@ namespace GGSystemMonitor
         {
             if (!File.Exists(settings.GGEngineCorePropsPath))
             {
-                File.AppendAllText("GGSystemMonitor.log", DateTime.Now + $" - coreProps.json not found at {settings.GGEngineCorePropsPath}. Please verify SteelSeries GG installation path and update in the settings.json file!" + Environment.NewLine);
+                AppendLog( DateTime.Now + $" - coreProps.json not found at {settings.GGEngineCorePropsPath}. Please verify SteelSeries GG installation path and update in the settings.json file!" + Environment.NewLine);
                 return;
             }
             string coreText = File.ReadAllText(settings.GGEngineCorePropsPath);
@@ -737,21 +712,21 @@ namespace GGSystemMonitor
                 var addr = j["address"]?.ToString();
                 if (string.IsNullOrEmpty(addr))
                 {
-                    File.AppendAllText("GGSystemMonitor.log", DateTime.Now + " - Could not find 'address' field in coreProps.json" + Environment.NewLine);
+                    AppendLog( DateTime.Now + " - Could not find 'address' field in coreProps.json" + Environment.NewLine);
                     return;
                 }
                 // Validate host is loopback before trusting it, to reject tampered coreProps.json.
                 var host = addr.Contains(':') ? addr.Substring(0, addr.LastIndexOf(':')) : addr;
                 if (!IPAddress.TryParse(host, out var ip) || !IPAddress.IsLoopback(ip))
                 {
-                    File.AppendAllText("GGSystemMonitor.log", DateTime.Now + " - coreProps.json address is not a loopback address; refusing to connect: " + addr + Environment.NewLine);
+                    AppendLog( DateTime.Now + " - coreProps.json address is not a loopback address; refusing to connect: " + addr + Environment.NewLine);
                     return;
                 }
                 baseUrl = "http://" + addr;
             }
             catch (Exception ex)
             {
-                File.AppendAllText("GGSystemMonitor.log", DateTime.Now + " - Failed to parse coreProps.json: " + ex.Message + Environment.NewLine);
+                AppendLog( DateTime.Now + " - Failed to parse coreProps.json: " + ex.Message + Environment.NewLine);
                 return;
             }
         }
@@ -780,7 +755,7 @@ namespace GGSystemMonitor
         private static void BindEvent()
         {
             // Build the bind payload using JObject so we can use hyphenated property names (device-type, has-text)
-            string deviceType = _oledFont != null ? "screened-128x40" : "keyboard";
+            string deviceType = settings?.OutputProfile == "arctis" ? "screened-128x48" : settings?.OutputProfile == "gamedac" ? "screened-128x52" : _oledFont != null ? "screened-128x40" : "keyboard";
             JObject datasEntry = _oledFont != null
                 ? new JObject(
                     new JProperty("has-text", false),
@@ -819,7 +794,8 @@ namespace GGSystemMonitor
             if (type == "weather")
             {
                 string wLoc = lineItem?.WeatherLocation ?? "";
-                _weatherByLocation.TryGetValue(wLoc, out var wd);
+                WeatherData wd;
+                lock (_weatherByLocation) _weatherByLocation.TryGetValue(wLoc, out wd);
                 if (wd == null) return "Loading...";
                 if (lineItem?.Label != null) return ApplyLabelFormat(lineItem.Label, type, lineItem.UseFahrenheit, lineItem.UseRamMb, wd);
                 string wIcon = GetWeatherIcon(wd.Condition, _blinkPhase);
@@ -1106,10 +1082,11 @@ namespace GGSystemMonitor
         private static string ApplyCharacterScroll(string content, int availableCols, int elapsed, int duration)
         {
             if (string.IsNullOrEmpty(content) || availableCols <= 0) return "";
-            if (content.Length <= availableCols || duration <= 0)
-                return content;
+            var elements = GetTextElements(content);
+            if (elements.Count <= availableCols || duration <= 0)
+                return string.Concat(elements.Take(availableCols));
 
-            int scrollDistance = content.Length - availableCols;
+            int scrollDistance = elements.Count - availableCols;
             double t = Math.Max(0.0, Math.Min(1.0, elapsed / (double)duration));
 
             int offset;
@@ -1120,7 +1097,7 @@ namespace GGSystemMonitor
             else
                 offset = (int)Math.Round(scrollDistance * (t - 0.2) / 0.6);
 
-            return content.Substring(Math.Min(offset, scrollDistance), availableCols);
+            return string.Concat(elements.Skip(Math.Min(offset, scrollDistance)).Take(availableCols));
         }
 
         private static string ApplyNativeOledTextScroll(string content, int availableCols, int elapsed, int duration)
@@ -1204,8 +1181,12 @@ namespace GGSystemMonitor
         }
         private static void BuildAndSendDisplay()
         {
+            lock (DisplayLock)
+            {
             string line1, line2;
-            if (AvailableVersion != null && settings.ShowUpdateNotifications && _updateNotifCycle >= 10000)
+            CheckTestPattern();
+            if (DateTime.UtcNow < _testPatternUntil) { line1 = AppendCapsLockIndicator("12345678901234"); line2 = "OLED TEST 12345"; }
+            else if (AvailableVersion != null && settings.ShowUpdateNotifications && _updateNotifCycle >= 10000)
             {
                 bool capsLock = settings.ShowCapsLockIndicator && capsLockToggled;
                 line1 = capsLock ? AppendCapsLockIndicator("Update") : "Update";
@@ -1218,6 +1199,7 @@ namespace GGSystemMonitor
             }
             if (_oledFont != null) SendToOledImage(line1, line2);
             else                   SendToOled(line1, line2);
+            }
         }
 
         private static void SendToOledImage(string line1, string line2)
@@ -1225,7 +1207,7 @@ namespace GGSystemMonitor
             var font = _oledFont;
             if (font == null) { SendToOled(line1, line2); return; }
 
-            const int W = OLED_IMAGE_WIDTH, H = OLED_IMAGE_HEIGHT;
+            int W = OLED_IMAGE_WIDTH, H = OLED_IMAGE_HEIGHT;
             var bytes = new byte[W * H / 8];
 
             using (var bmp = new Bitmap(W, H, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
@@ -1469,6 +1451,7 @@ namespace GGSystemMonitor
             var items = settings.TopLineItems;
             var lineItem = (items != null && items.Count > 0) ? items[topLineIndex % items.Count] : new LineItem { Type = "CpuTemperature" };
             string type = lineItem?.Type?.ToLower().Replace(" ", "").Replace("_", "") ?? "";
+            SelectWidgetHardware(lineItem);
             string content = GetItemContent(lineItem);
 
             int reservedCols = GetReservedCols(isTopLine: true, lineItem, capsLock);
@@ -1519,6 +1502,7 @@ namespace GGSystemMonitor
             var items = settings.BottomLineItems;
             var lineItem = (items != null && items.Count > 0) ? items[bottomLineIndex % items.Count] : new LineItem { Type = "GpuTemperature" };
             string type = lineItem?.Type?.ToLower().Replace(" ", "").Replace("_", "") ?? "";
+            SelectWidgetHardware(lineItem);
             string content = GetItemContent(lineItem);
 
             int reservedCols = GetReservedCols(isTopLine: false, lineItem, false);
@@ -1581,7 +1565,7 @@ namespace GGSystemMonitor
             sb.Append("{\"game\":\"").Append(APP_NAME)
               .Append("\",\"event\":\"").Append(EVENT_NAME)
               .Append("\",\"data\":{\"value\":").Append(value)
-              .Append(",\"frame\":{\"image-data-128x40\":[");
+              .Append(",\"frame\":{\"image-data-128x" + OLED_IMAGE_HEIGHT + "\":[");
             for (int i = 0; i < bytes.Length; i++)
             {
                 if (i > 0) sb.Append(',');
@@ -1603,13 +1587,13 @@ namespace GGSystemMonitor
             {
                 var url = baseUrl + path;
                 using (var content = new StringContent(json, Encoding.UTF8, "application/json"))
-                using (var resp = http.PostAsync(url, content).Result)
+                using (var resp = GgHttp.PostAsync(url, content).Result)
                 {
                     if (!resp.IsSuccessStatusCode)
                     {
                         string body = "";
                         try { body = resp.Content.ReadAsStringAsync().Result; } catch { }
-                        File.AppendAllText("GGSystemMonitor.log",
+                        AppendLog(
                             $"{DateTime.Now} - GameSense {(int)resp.StatusCode} for {path}: {body}{Environment.NewLine}");
                     }
                 }
@@ -1621,7 +1605,7 @@ namespace GGSystemMonitor
                     _ggConnected = false;
                     _reconnectCooldownMs = 2000;
                     var msg = ex is AggregateException ae && ae.InnerException != null ? ae.InnerException.Message : ex.Message;
-                    File.AppendAllText("GGSystemMonitor.log", DateTime.Now + " - GG Engine connection lost: " + msg + Environment.NewLine);
+                    AppendLog( DateTime.Now + " - GG Engine connection lost: " + msg + Environment.NewLine);
                 }
                 baseUrl = null;
             }
@@ -1639,11 +1623,7 @@ namespace GGSystemMonitor
                         OledFontAdvanceCache.Clear();
                 }
 
-                GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: false);
-                GC.WaitForPendingFinalizers();
 
-                using (var process = Process.GetCurrentProcess())
-                    EmptyWorkingSet(process.Handle);
             }
             catch { }
         }
@@ -1733,6 +1713,7 @@ namespace GGSystemMonitor
                     if (IsLineItemType(item, "weather"))
                         locs.Add(item.WeatherLocation ?? "");
             }
+            lock (_weatherByLocation) foreach (var oldKey in _weatherByLocation.Keys.Where(k => !locs.Contains(k)).ToArray()) _weatherByLocation.Remove(oldKey);
             foreach (var loc in locs)
             {
                 string locCopy = loc;
@@ -1779,7 +1760,7 @@ namespace GGSystemMonitor
                     try { RefreshWeatherFromEc(loc, wd, wd.City, provinceCode); }
                     catch (Exception ecEx)
                     {
-                        File.AppendAllText("GGSystemMonitor.log", DateTime.Now + " - EC weather fetch failed (using wttr.in fallback): " + ecEx.Message + Environment.NewLine);
+                        AppendLog( DateTime.Now + " - EC weather fetch failed (using wttr.in fallback): " + ecEx.Message + Environment.NewLine);
                     }
                 }
 
@@ -1790,7 +1771,7 @@ namespace GGSystemMonitor
                 if (!_weatherLoggedError)
                 {
                     _weatherLoggedError = true;
-                    File.AppendAllText("GGSystemMonitor.log", DateTime.Now + " - Weather fetch failed: " + ex.Message + Environment.NewLine);
+                    AppendLog( DateTime.Now + " - Weather fetch failed: " + ex.Message + Environment.NewLine);
                 }
             }
         }
@@ -2039,12 +2020,12 @@ namespace GGSystemMonitor
                 }
                 catch (Exception ex)
                 {
-                    File.AppendAllText("GGSystemMonitor.log",
+                    AppendLog(
                         $"{DateTime.Now} - SMTC AsTask failed: {ex.Message}{Environment.NewLine}");
                 }
             }
 
-            File.AppendAllText("GGSystemMonitor.log",
+            AppendLog(
                 $"{DateTime.Now} - SMTC: GetResults not found. srrw={_srrw != null} resultType={resultType?.Name} " +
                 $"Interfaces: {string.Join(", ", op.GetType().GetInterfaces().Select(i => i.Name))}{Environment.NewLine}");
             return null;
@@ -2270,7 +2251,7 @@ namespace GGSystemMonitor
                 if (!_smtcLoggedError)
                 {
                     _smtcLoggedError = true;
-                    File.AppendAllText("GGSystemMonitor.log", DateTime.Now + " - SMTC poll failed: " + ex.Message + Environment.NewLine);
+                    AppendLog( DateTime.Now + " - SMTC poll failed: " + ex.Message + Environment.NewLine);
                 }
                 PollNowPlayingSpotifyFallback();
             }
@@ -2491,7 +2472,7 @@ namespace GGSystemMonitor
                     if (current == last) continue;
                     last = current;
                     capsLockToggled = current;
-                    try { BuildAndSendDisplay(); } catch { }
+                    screenUpdate = 0;
                 }
             }) { IsBackground = true };
             thread.Start();
@@ -2530,7 +2511,7 @@ namespace GGSystemMonitor
         private static (double? used, double? total) GetRamUsage()
         {
             if (memoryHardware == null) return (null, null);
-            memoryHardware.Update();
+            // Hardware was refreshed by the shared polling pass.
             var usedSensor = memoryHardware.Sensors.FirstOrDefault(s =>
                 s.SensorType == SensorType.Data && s.Name != null &&
                 s.Name.ToLower().Contains("used") && !s.Name.ToLower().Contains("virtual"));
@@ -2546,7 +2527,7 @@ namespace GGSystemMonitor
 
         private static bool IsCpuTemperatureBlockedSignal(double? temperature)
         {
-            return !temperature.HasValue || temperature.Value <= 0.0;
+            return !IsValidTemperature(temperature);
         }
 
         private static void WriteMonitorStatus()
@@ -2554,10 +2535,16 @@ namespace GGSystemMonitor
             try
             {
                 var status = new JObject(
+                    new JProperty("SchemaVersion", 2),
+                    new JProperty("ProcessId", CurrentProcessId),
+                    new JProperty("Elevated", new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator)),
+                    new JProperty("CpuStatus", CpuStatus()),
+                    new JProperty("SensorError", _sensorError),
                     new JProperty("UpdatedUtc", DateTime.UtcNow.ToString("o")),
                     new JProperty("CpuTemperature",
                         cachedCpuTemp.HasValue ? (JToken)new JValue(cachedCpuTemp.Value) : JValue.CreateNull()),
-                    new JProperty("CpuTemperatureBlockedByAv", IsCpuTemperatureBlockedSignal(cachedCpuTemp))
+                    new JProperty("CpuTemperatureBlockedByAv", false),
+                    new JProperty("CpuTemperatureUnavailable", IsCpuTemperatureBlockedSignal(cachedCpuTemp))
                 );
 
                 string tmpPath = MonitorStatusFilePath + ".tmp";
@@ -2967,7 +2954,7 @@ namespace GGSystemMonitor
         };
 
         internal static bool IsCpuNameInDictionary(string name) =>
-            !string.IsNullOrEmpty(name) && CpuMaxTemps.ContainsKey(name);
+            !string.IsNullOrEmpty(name) && CpuMaxTemps.ContainsKey(NormalizeCpuName(name));
 
         internal static bool IsGpuNameInDictionary(string name) =>
             !string.IsNullOrEmpty(name) && GpuMaxTemps.ContainsKey(name);
@@ -2975,7 +2962,7 @@ namespace GGSystemMonitor
         internal static float GetCpuMaximum(string CpuName)
         {
             if (string.IsNullOrEmpty(CpuName)) return 100.0f;
-            if (CpuMaxTemps.TryGetValue(CpuName, out float v)) return v;
+            if (CpuMaxTemps.TryGetValue(NormalizeCpuName(CpuName), out float v)) return v;
             if (CpuName.Contains("Intel")) return 100.0f;
             return 95.0f;
         }

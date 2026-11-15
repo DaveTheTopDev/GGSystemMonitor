@@ -1,10 +1,13 @@
-<#
+﻿<#
 .SYNOPSIS
     GGSystemMonitor Installer, Updater, and Uninstaller.
 .PARAMETER Uninstall
     Removes GGSystemMonitor from the system completely (silent - called by Uninstall.bat).
 #>
 param([switch]$Uninstall, [string]$DoneFile = "", [int]$ExcludePid = 0)
+
+$setupLog = Join-Path $env:TEMP "GGSystemMonitor-install.log"
+try { Start-Transcript -Path $setupLog -Append | Out-Null } catch {}
 
 $AppName         = "GGSystemMonitor"
 $ExeName         = "GGSystemMonitor.exe"
@@ -18,7 +21,7 @@ $UninstallRegKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$A
 
 if ($Uninstall -and $PSCommandPath) {
     $InstallDir = Split-Path -Parent $PSCommandPath
-    $ExePath    = Join-Path $InstallDir $ExeName
+    $script:ExePath    = Join-Path $InstallDir $ExeName
     $IconPath   = Join-Path $InstallDir $IconName
 }
 
@@ -51,21 +54,16 @@ function Get-HardwareMonitorDriverServices([string]$TargetDir) {
     ) | Where-Object { $_ } | Select-Object -Unique
 
     $services = @{}
-    foreach ($name in $knownNames) {
-        $svc = Get-CimInstance Win32_SystemDriver -Filter "Name='$name'" -ErrorAction SilentlyContinue
-        if ($svc) { $services[$svc.Name] = $svc }
-    }
-
     Get-CimInstance Win32_SystemDriver -ErrorAction SilentlyContinue | ForEach-Object {
         $driverPath = Get-NormalizedDriverPath $_.PathName
         $isAppDriver =
-            $knownNames -contains $_.Name -or
+            $_.Name -eq $AppName -or
             $_.Name -match "GGSystemMonitor" -or
             $_.DisplayName -match "GGSystemMonitor"
         $isInInstallDir =
             $targetFullPath -and
             $driverPath -and
-            $driverPath.StartsWith($targetFullPath, [System.StringComparison]::OrdinalIgnoreCase)
+            $driverPath.StartsWith($targetFullPath + '\', [System.StringComparison]::OrdinalIgnoreCase)
 
         if ($isAppDriver -or $isInInstallDir) {
             $services[$_.Name] = $_
@@ -123,96 +121,44 @@ function Remove-SysFilesWithRetry([string]$TargetDir) {
 
 # -- Self-elevate silently (no console window) --
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    $psArgs = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSCommandPath`""
+    $psArgs = "-NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSCommandPath`""
     if ($Uninstall)    { $psArgs += " -Uninstall" }
     if ($DoneFile)     { $psArgs += " -DoneFile `"$DoneFile`"" }
     if ($ExcludePid)   { $psArgs += " -ExcludePid $ExcludePid" }
-    Start-Process powershell.exe $psArgs -Verb RunAs
-    exit
+    try {
+        $child = Start-Process powershell.exe $psArgs -Verb RunAs -Wait -PassThru
+        exit $child.ExitCode
+    } catch {
+        Add-Type -AssemblyName System.Windows.Forms
+        [System.Windows.Forms.MessageBox]::Show("Setup could not start or elevation was cancelled. See $setupLog. $_", "GGSystemMonitor Setup") | Out-Null
+        exit 1
+    }
 }
 
 # ===========================================================================
 #  UNINSTALL  (silent -- confirmation was already shown by SettingsForm)
 # ===========================================================================
 if ($Uninstall) {
-    function Set-DoneFile([string]$value) {
-        if ($DoneFile) { try { [System.IO.File]::WriteAllText($DoneFile, $value) } catch {} }
-    }
-
-    $uninstallError = $null
     try {
-        Set-DoneFile "5"
-        $procName = [System.IO.Path]::GetFileNameWithoutExtension($ExeName)
-        Get-Process -Name $procName -ErrorAction SilentlyContinue |
-            Where-Object { $ExcludePid -eq 0 -or $_.Id -ne $ExcludePid } |
-            Stop-Process -Force -ErrorAction SilentlyContinue
-        $deadline = (Get-Date).AddSeconds(5)
-        while ((Get-Date) -lt $deadline) {
-            $remaining = @(Get-Process -Name $procName -ErrorAction SilentlyContinue |
-                Where-Object { $ExcludePid -eq 0 -or $_.Id -ne $ExcludePid })
-            if ($remaining.Count -eq 0) { break }
-            Start-Sleep -Milliseconds 200
-        }
-        Set-DoneFile "20"
-
-        Stop-HardwareMonitorDrivers $InstallDir
-        Set-DoneFile "35"
-
-        Remove-SysFilesWithRetry $InstallDir
-        Set-DoneFile "55"
-
-        if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-        }
-        Set-DoneFile "65"
-
-        if (Test-Path $UninstallRegKey) { Remove-Item $UninstallRegKey -Recurse -Force }
-
-        $lnk = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$AppName.lnk"
-        if (Test-Path $lnk) { Remove-Item $lnk -Force }
-
-        $deskLnk = Join-Path ([System.Environment]::GetFolderPath('Desktop')) "GG System Monitor.lnk"
-        if (Test-Path $deskLnk) { Remove-Item $deskLnk -Force }
-        $deskLnkLegacy = Join-Path ([System.Environment]::GetFolderPath('Desktop')) "$AppName.lnk"
-        if (Test-Path $deskLnkLegacy) { Remove-Item $deskLnkLegacy -Force }
-        Set-DoneFile "75"
-
-        # Delete everything we can right now (non-script files will succeed)
-        if (Test-Path $InstallDir) {
-            Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
-        }
-
-        # If the folder still exists it is because PowerShell holds a handle on
-        # Install.ps1 while executing it.  Schedule a deferred rmdir that runs
-        # ~3 seconds after this script exits and releases the lock.
-        if (Test-Path $InstallDir) {
-            $rmArgs = "/c timeout /t 15 /nobreak >nul 2>&1 && rmdir /s /q `"$InstallDir`""
-            Start-Process -FilePath "cmd.exe" -ArgumentList $rmArgs -WindowStyle Hidden
-        }
-
-        Set-DoneFile "DONE"
+        $workerSource = Join-Path $InstallDir "UninstallWorker.ps1"
+        if (-not (Test-Path -LiteralPath $workerSource)) { throw "UninstallWorker.ps1 is missing. Repair the installation before uninstalling." }
+        $base = Join-Path $env:TEMP ("GGSystemMonitor-uninstall-" + [guid]::NewGuid().ToString("N"))
+        $worker = $base + ".ps1"
+        $helpers = $base + ".functions.ps1"
+        $tokens = $null; $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($PSCommandPath, [ref]$tokens, [ref]$errors)
+        $names = @("Get-NormalizedDriverPath", "Get-HardwareMonitorDriverServices", "Stop-HardwareMonitorDrivers", "Remove-SysFilesWithRetry")
+        $functions = $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in $names }, $true)
+        [IO.File]::WriteAllText($helpers, (($functions | ForEach-Object { $_.Extent.Text }) -join [Environment]::NewLine))
+        Copy-Item -LiteralPath $workerSource -Destination $worker -ErrorAction Stop
+        $workerArgs = "-NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File " +
+            [char]34 + $worker + [char]34 + " -TargetDir " + [char]34 + $InstallDir +
+            [char]34 + " -FunctionsFile " + [char]34 + $helpers + [char]34
+        Start-Process -FilePath "powershell.exe" -ArgumentList $workerArgs -WindowStyle Hidden -ErrorAction Stop
     } catch {
-        $uninstallError = "$_"
-        Set-DoneFile "ERROR:$uninstallError"
-    }
-
-    # When called from SettingsForm (-DoneFile set) it handles UI; otherwise show a MessageBox
-    if (-not $DoneFile) {
         Add-Type -AssemblyName System.Windows.Forms
-        [System.Windows.Forms.Application]::EnableVisualStyles()
-        if ($uninstallError) {
-            [System.Windows.Forms.MessageBox]::Show(
-                "Uninstall failed:`n$uninstallError",
-                "Uninstall Failed",
-                [System.Windows.Forms.MessageBoxButtons]::OK,
-                [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
-        } else {
-            [System.Windows.Forms.MessageBox]::Show(
-                "GGSystemMonitor has been successfully uninstalled.",
-                "Uninstall Complete",
-                [System.Windows.Forms.MessageBoxButtons]::OK,
-                [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
-        }
+        [Windows.Forms.MessageBox]::Show("Uninstall could not start: $_", "Uninstall Failed") | Out-Null
+        exit 1
     }
     exit 0
 }
@@ -221,6 +167,7 @@ if ($Uninstall) {
 #  INSTALL / UPDATE  -- GUI
 # ===========================================================================
 $SourceDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $SourceDir "Prerequisites.ps1")
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -279,7 +226,8 @@ function Get-ExistingInstallDir {
     foreach ($candidate in ($candidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
         try {
             $dir = [System.IO.Path]::GetFullPath($candidate).TrimEnd('\')
-            if (Test-Path (Join-Path $dir $ExeName)) {
+            if ((Test-Path (Join-Path $dir $ExeName)) -and
+                ((Test-Path $UninstallRegKey) -or (Test-Path (Join-Path $dir "Uninstall.bat")))) {
                 return $dir
             }
         } catch {}
@@ -291,7 +239,7 @@ function Get-ExistingInstallDir {
 $existingInstallDir = Get-ExistingInstallDir
 if (-not [string]::IsNullOrWhiteSpace($existingInstallDir)) {
     $InstallDir = $existingInstallDir
-    $ExePath    = Join-Path $InstallDir $ExeName
+    $script:ExePath    = Join-Path $InstallDir $ExeName
     $IconPath   = Join-Path $InstallDir $IconName
 }
 
@@ -381,7 +329,7 @@ $lblBannerText.AutoSize  = $false
 $lblBannerText.Size      = New-Object System.Drawing.Size(420, 38)
 $lblBannerText.Location  = New-Object System.Drawing.Point(52, 15)
 $lblBannerText.Text      = if ($script:isSameVersion) {
-    "GGSystemMonitor v$curVer is already installed.`nThis version is up to date - no update is required."
+    "GGSystemMonitor v$curVer is already installed.`nClick Repair to refresh this version while preserving your settings."
 } elseif ($script:isUpdate) {
     "GGSystemMonitor v$curVer is already installed.`nClick Update to install version $newVer."
 } else {
@@ -477,13 +425,13 @@ $footer.BackColor = $clrFooter
 $form.Controls.Add($footer)
 
 $btnInstall           = New-Object System.Windows.Forms.Button
-$btnInstall.Text      = if ($script:isSameVersion) { "Up to Date" } elseif ($script:isUpdate) { "Update" } else { "Install" }
+$btnInstall.Text      = if ($script:isSameVersion) { "Repair" } elseif ($script:isUpdate) { "Update" } else { "Install" }
 $btnInstall.Size      = New-Object System.Drawing.Size(100, 32)
 $btnInstall.Location  = New-Object System.Drawing.Point(366, 11)
 $btnInstall.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
-$btnInstall.BackColor = if ($script:isSameVersion) { [System.Drawing.Color]::FromArgb(180, 180, 195) } else { $clrBlue }
+$btnInstall.BackColor = $clrBlue
 $btnInstall.ForeColor = [System.Drawing.Color]::White
-$btnInstall.Enabled   = -not $script:isSameVersion
+$btnInstall.Enabled   = $true
 $btnInstall.Font      = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
 $btnInstall.FlatAppearance.BorderSize = 0
 $footer.Controls.Add($btnInstall)
@@ -499,6 +447,7 @@ $footer.Controls.Add($btnCancel)
 
 # -- Events --
 $script:installDone = $false
+$script:restartRequired = $false
 $script:openSettingsAfterClose = $false
 $script:settingsExePath = ""
 $script:settingsWorkingDirectory = ""
@@ -515,25 +464,29 @@ $btnBrowseInstall.Add_Click({
 
 $btnCancel.Add_Click({ $form.Close() })
 
-$form.Add_FormClosed({
-    if ($script:openSettingsAfterClose -and
-        -not [string]::IsNullOrWhiteSpace($script:settingsExePath) -and
-        (Test-Path $script:settingsExePath)) {
-        Start-Process -FilePath $script:settingsExePath `
-            -ArgumentList "--settings" `
-            -WorkingDirectory $script:settingsWorkingDirectory `
-            -ErrorAction SilentlyContinue
-    }
-})
-
 $btnInstall.Add_Click({
     # Second click (after install) -> close
     if ($script:installDone) { $form.Close(); return }
 
-    $InstallDir = $txtInstallPath.Text.Trim()
-    $ExePath    = Join-Path $InstallDir $ExeName
+    try {
+        $script:InstallDir = [System.IO.Path]::GetFullPath($txtInstallPath.Text.Trim())
+        $root = [System.IO.Path]::GetPathRoot($InstallDir).TrimEnd('\')
+        $blocked = @($root, $env:WINDIR, $env:USERPROFILE, $env:LOCALAPPDATA, $env:ProgramFiles)
+        if ($blocked | Where-Object { $_ -and $_.TrimEnd('\') -eq $InstallDir.TrimEnd('\') }) {
+            throw "Choose a dedicated application folder, not a system or profile root."
+        }
+        $existing = @(Get-ChildItem -LiteralPath $InstallDir -Force -ErrorAction SilentlyContinue)
+        if ($existing.Count -gt 0 -and -not (Test-Path (Join-Path $InstallDir $ExeName))) {
+            throw "Choose an empty folder or an existing GGSystemMonitor installation."
+        }
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show("Invalid installation folder: $_", "GGSystemMonitor Setup") | Out-Null
+        return
+    }
+    $script:ExePath    = Join-Path $InstallDir $ExeName
 
     $btnInstall.Text     = if ($script:isUpdate) { "Updating..." } else { "Installing..." }
+    $form.ControlBox = $false
     $btnInstall.Enabled  = $false
     $btnCancel.Enabled   = $false
     $chkAutoStart.Enabled  = $false
@@ -544,6 +497,12 @@ $btnInstall.Add_Click({
     $form.Refresh()
 
     try {
+        # Verify/install bundled prerequisites before modifying the application.
+        $script:restartRequired = Invoke-OfflinePrerequisites (Join-Path $SourceDir "Prerequisites") {
+            param($message)
+            $lblBannerText.Text = $message
+            $form.Refresh()
+        }
         # Stop any running instance and wait for it to fully exit
         $procName = [System.IO.Path]::GetFileNameWithoutExtension($ExeName)
         Get-Process -Name $procName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -611,7 +570,7 @@ $btnInstall.Add_Click({
         $progressBar.Value = 74; $form.Refresh()
 
         # Add / Remove Programs registry entry
-        $installedVer = Get-AppVersion $ExePath
+        $script:installedVer = Get-AppVersion $ExePath
         New-Item -Path $UninstallRegKey -Force | Out-Null
         $displayIcon = if (Test-Path $IconPath) { $IconPath } else { $ExePath }
 
@@ -627,36 +586,35 @@ $btnInstall.Add_Click({
 
         $shortcutIcon = if (Test-Path $IconPath) { "$IconPath,0" } else { "$ExePath,0" }
 
-        if (-not $script:isUpdate) {
-            # Start Menu shortcut
-            if ($chkShortcut.Checked) {
-                $lnkPath = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$AppName.lnk"
-                $shell   = New-Object -ComObject WScript.Shell
-                $lnk     = $shell.CreateShortcut($lnkPath)
-                $lnk.TargetPath       = $ExePath
-                $lnk.Arguments        = "--settings"
-                $lnk.WorkingDirectory = $InstallDir
-                $lnk.Description      = "GGSystemMonitor Settings"
-                $lnk.IconLocation     = $shortcutIcon
-                $lnk.Save()
-            }
+        # Refresh existing shortcuts on updates. Repair also restores the canonical
+        # Settings entry if it was lost; a normal update does not add opted-out links.
+        $lnkPath = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$AppName.lnk"
+        $deskLnkPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "GG System Monitor.lnk"
+        $refreshStart = (-not $script:isUpdate -and $chkShortcut.Checked) -or
+            ($script:isUpdate -and ((Test-Path -LiteralPath $lnkPath) -or $script:isSameVersion))
+        $refreshDesktop = (-not $script:isUpdate -and $chkDesktop.Checked) -or
+            ($script:isUpdate -and (Test-Path -LiteralPath $deskLnkPath))
+        foreach ($shortcutPath in @(
+            $(if ($refreshStart) { $lnkPath }),
+            $(if ($refreshDesktop) { $deskLnkPath })
+        )) {
+            if (-not $shortcutPath) { continue }
+            New-Item -ItemType Directory -Path (Split-Path -Parent $shortcutPath) -Force | Out-Null
+            # Recreate our shortcut so stale Run as administrator flags are not retained.
+            if (Test-Path -LiteralPath $shortcutPath) { Remove-Item -LiteralPath $shortcutPath -Force -ErrorAction Stop }
+            $shell = New-Object -ComObject WScript.Shell
+            $lnk = $shell.CreateShortcut($shortcutPath)
+            $lnk.TargetPath = $ExePath
+            $lnk.Arguments = "--settings"
+            $lnk.WorkingDirectory = $InstallDir
+            $lnk.Description = "GGSystemMonitor Settings"
+            $lnk.IconLocation = $shortcutIcon
+            $lnk.Save()
+            [Runtime.InteropServices.Marshal]::FinalReleaseComObject($lnk) | Out-Null
+            [Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) | Out-Null
         }
         $progressBar.Value = 92; $form.Refresh()
 
-        if (-not $script:isUpdate) {
-            # Desktop shortcut
-            if ($chkDesktop.Checked) {
-                $deskLnkPath = Join-Path ([System.Environment]::GetFolderPath('Desktop')) "GG System Monitor.lnk"
-                $shell       = New-Object -ComObject WScript.Shell
-                $lnk         = $shell.CreateShortcut($deskLnkPath)
-                $lnk.TargetPath       = $ExePath
-                $lnk.Arguments        = "--settings"
-                $lnk.WorkingDirectory = $InstallDir
-                $lnk.Description      = "GGSystemMonitor Settings"
-                $lnk.IconLocation     = $shortcutIcon
-                $lnk.Save()
-            }
-        }
         $progressBar.Value = 96; $form.Refresh()
 
         # -- Success state --
@@ -671,7 +629,7 @@ $btnInstall.Add_Click({
 
         # Use a timer so the UI thread stays free and the progress bar animation
         # can finish painting before the banner and close button appear.
-        $completeTimer = New-Object System.Windows.Forms.Timer
+        $script:completeTimer = New-Object System.Windows.Forms.Timer
         $completeTimer.Interval = 600
         $completeTimer.Add_Tick({
             param($s, $e)
@@ -682,13 +640,26 @@ $btnInstall.Add_Click({
             $lblBannerText.Text = if ($script:isUpdate) {
                 "GGSystemMonitor has been updated to v$installedVer successfully."
             } else {
-                "GGSystemMonitor has been installed successfully.`nIt will start automatically at your next startup."
+                "GGSystemMonitor and its required components have been installed successfully."
             }
+            $form.ControlBox = $true
             $btnInstall.Text      = "Close"
             $btnInstall.Enabled   = $true
             $btnInstall.BackColor = $clrGreen
             $form.Refresh()
 
+            # A prerequisite may need a reboot. Never force restart or launch an unusable runtime.
+            if ($script:restartRequired) {
+                $script:openSettingsAfterClose = $false
+                $lblBannerText.Text = "Setup completed. Restart Windows to finish installing prerequisites."
+                $btnInstall.Text = "Close"
+                [System.Windows.Forms.MessageBox]::Show(
+                    "GGSystemMonitor and its prerequisites have been installed. Windows needs a restart before CPU sensors can be used. No restart will be forced.",
+                    "Setup Complete - Restart Required",
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+                return
+            }
             # Launch the app
             if (-not $script:isUpdate) {
                 if ($chkAutoStart.Checked) {
@@ -701,9 +672,9 @@ $btnInstall.Add_Click({
                 Start-Process -FilePath $ExePath -WorkingDirectory $InstallDir -ErrorAction SilentlyContinue
             }
 
-            $closeTimer = New-Object System.Windows.Forms.Timer
+            $script:closeTimer = New-Object System.Windows.Forms.Timer
             $closeTimer.Interval = 2000
-            $closeTimer.Add_Tick({ param($s2, $e2) $s2.Stop(); $form.Close() })
+            $closeTimer.Add_Tick({ param($s2, $e2) $s2.Stop(); $s2.Dispose(); $form.Close() })
             $closeTimer.Start()
         })
         $completeTimer.Start()
@@ -735,3 +706,11 @@ $btnInstall.Add_Click({
 })
 
 $form.ShowDialog() | Out-Null
+if ($script:openSettingsAfterClose -and -not $script:restartRequired) {
+    try {
+        Start-Process -FilePath $script:settingsExePath -ArgumentList "--settings" -WorkingDirectory $script:settingsWorkingDirectory -ErrorAction Stop
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show("Update completed, but Settings could not open. Use the Start menu shortcut. $_", "GGSystemMonitor") | Out-Null
+    }
+}
+try { Stop-Transcript | Out-Null } catch {}
