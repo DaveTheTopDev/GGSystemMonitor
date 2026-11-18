@@ -7,13 +7,13 @@
 **Bring hardware sensor data and live widgets to your SteelSeries keyboard OLED screen.**  
 A fully automated, installer-based Windows app that hooks into SteelSeries GG software and displays live system metrics, weather, media, time, and more - right on your Apex Pro's OLED display.
 
-[![Release](https://img.shields.io/badge/release-v3.2.0-brightgreen?style=for-the-badge)](https://github.com/DaveTheTopDev/GGSystemMonitor/releases)
+[![Release](https://img.shields.io/badge/release-v3.2.1-brightgreen?style=for-the-badge)](https://github.com/DaveTheTopDev/GGSystemMonitor/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows-blue?style=for-the-badge&logo=windows)](https://github.com/DaveTheTopDev/GGSystemMonitor)
 [![Language](https://img.shields.io/badge/language-C%23%20.NET-purple?style=for-the-badge&logo=dotnet)](https://github.com/DaveTheTopDev/GGSystemMonitor)
 [![RAM](https://img.shields.io/badge/memory-lightweight-orange?style=for-the-badge)](https://github.com/DaveTheTopDev/GGSystemMonitor)
 [![License](https://img.shields.io/badge/license-GPL%203.0-gray?style=for-the-badge)](LICENSE)
 
-### [⬇️ Download Latest Release](https://github.com/DaveTheTopDev/GGSystemMonitor/releases/download/3.2.0/GGSystemMonitor-V3.2.0.zip)
+### [⬇️ Download Latest Release](https://github.com/DaveTheTopDev/GGSystemMonitor/releases/download/3.2.1/GGSystemMonitor-V3.2.1.zip)
 
 </div>
 
@@ -47,7 +47,19 @@ The same version offers **Repair** to refresh application files without resettin
 
 ---
 
-## What's New in v3.2.0
+## What's New in v3.2.1
+
+| | Change |
+|---|---|
+| 📦 | **PawnIO update fix** - detects compatible installed drivers even without an Apps & Features entry. A PawnIO conflict no longer blocks the app update; setup warns if CPU sensor support could not be verified. |
+| 🛠 | **Responsive installer** - prerequisite installation and file operations run in the background, with stage progress, time limits for prerequisite installers, and a setup log. |
+| 🔒 | **Safer update recovery** - existing settings stay intact, other GGSystemMonitor copies are not stopped, and failed setup no longer deletes the destination folder. |
+
+If setup fails, see the current stage and the log at %TEMP%\GGSystemMonitor-install.log. Extract the full ZIP locally before running setup.
+
+---
+
+## Previous Update - v3.2.0
 
 Version 3.2.0 focuses on hardware selection, standalone setup, diagnostics, and reliability.
 

@@ -11,5 +11,5 @@ if not exist "%SCRIPT%" (
 )
 
 rem Detach immediately: neither this cmd window nor a waiting console stays open.
-start "" powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File "%SCRIPT%"
+start "" "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File "%SCRIPT%"
 exit /b 0

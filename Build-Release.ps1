@@ -56,6 +56,7 @@ if ($SkipZip) {
     Write-Output $output
     return
 }
-$zip = Join-Path $root "artifacts\GGSystemMonitor-3.2.0-$Runtime.zip"
+$version = (Get-Item -LiteralPath (Join-Path $output "GGSystemMonitor.exe")).VersionInfo
+$zip = Join-Path $root "artifacts\GGSystemMonitor-$($version.FileMajorPart).$($version.FileMinorPart).$($version.FileBuildPart)-$Runtime.zip"
 Compress-Archive -Path (Join-Path $folder "*") -DestinationPath $zip -Force
 Get-FileHash -Algorithm SHA256 -LiteralPath $zip | Format-List

@@ -36,7 +36,7 @@ namespace GGSystemMonitor
         private static int SCREEN_COLS = 15;
         private const int OLED_UPDATE_INTERVAL_MS = 250;
         private const string EVENT_NAME = "SYS_MONITOR";
-        internal const string VERSION = "3.2.0";
+        internal const string VERSION = "3.2.1";
         private const string GITHUB_REPO = "DaveTheTopDev/GGSystemMonitor";
         private static HttpClient http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
         private static readonly HttpClient GgHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
