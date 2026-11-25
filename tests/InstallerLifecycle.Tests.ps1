@@ -10,9 +10,18 @@ function Import-TestFunction($File, $Name) {
 }
 . (Import-TestFunction "Install.ps1" "Get-ExistingInstallDir")
 . (Import-TestFunction "UninstallWorker.ps1" "Remove-GGInstallation")
+. (Join-Path $root "SetupOperations.ps1")
 $count = 0
-function Assert($Value, $Message) { if (-not $Value) { throw $Message }; $script:count++; Write-Host "PASS $Message" }
-$temp = Join-Path $env:TEMP ("GGSystemMonitor-lifecycle-" + [guid]::NewGuid().ToString("N"))
+function Assert($Value, $Message, $Details = "") {
+    if (-not $Value) { throw "$Message $Details".TrimEnd() }
+    $script:count++
+    Write-Host "PASS $Message"
+}
+# Windows can expose TEMP using an 8.3 alias (for example RUNNER~1).
+# Install detection returns a full path, so build the fixture from the same
+# canonical temp root rather than comparing different spellings of one folder.
+$tempRoot = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $env:TEMP).ProviderPath)
+$temp = Join-Path $tempRoot ("GGSystemMonitor-lifecycle-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $temp | Out-Null
 $oldLocal = $env:LOCALAPPDATA
 $AppName="GGSystemMonitor"; $ExeName="GGSystemMonitor.exe"; $TaskName=$AppName
@@ -22,10 +31,11 @@ $install=Join-Path $temp "GGSystemMonitor"
 $script:taskPresent=$false
 function Get-ScheduledTask { param($TaskName,$ErrorAction) if ($script:taskPresent) { return [pscustomobject]@{TaskName=$TaskName} } }
 function Unregister-ScheduledTask { param($TaskName,$Confirm,$ErrorAction) $script:taskPresent=$false }
-function Stop-HardwareMonitorDrivers { param($TargetDir) }
-function Remove-SysFilesWithRetry { param($TargetDir) }
+function Find-LegacyDriverServices { param($ExpectedPath,$Pulse) @() }
 function Get-Process { param($Name,$ErrorAction) @() }
 function Set-Progress { param($Value) }
+function Write-UninstallLog { param($Message) }
+function Show-UninstallStatus { param($Message) }
 function Get-UninstallShortcuts { @(Join-Path $temp "shortcut.lnk") }
 try {
     $env:LOCALAPPDATA=$temp
@@ -34,7 +44,8 @@ try {
     [IO.File]::WriteAllText((Join-Path $install $ExeName), "fixture")
     Assert ((Get-ExistingInstallDir) -eq "") "Stray executable alone does not trigger update"
     [IO.File]::WriteAllText((Join-Path $install "Uninstall.bat"), "fixture")
-    Assert ((Get-ExistingInstallDir) -eq $install) "Existing application with uninstall marker triggers update"
+    $detected = Get-ExistingInstallDir
+    Assert ($detected -eq $install) "Existing application with uninstall marker triggers update" "Expected '$install'; detected '$detected'."
     New-Item -ItemType Directory -Path $regKey | Out-Null
     [IO.File]::WriteAllText((Join-Path $temp "shortcut.lnk"), "fixture")
     $script:taskPresent=$true
@@ -45,6 +56,20 @@ try {
     Assert (-not (Test-Path (Join-Path $temp "shortcut.lnk"))) "Uninstall removes shortcuts"
     Assert ((Get-ExistingInstallDir) -eq "") "Install after successful uninstall is fresh install"
 
+    New-Item -ItemType Directory -Path $install,$regKey | Out-Null
+    [IO.File]::WriteAllText((Join-Path $install $ExeName), "fixture")
+    $driverPath=Join-Path $install 'GGSystemMonitor.sys'
+    [IO.File]::WriteAllText($driverPath, "legacy fixture")
+    [IO.File]::WriteAllText((Join-Path $install 'Uninstall.bat'), "fixture")
+    $script:taskPresent=$true
+    $lock=[IO.File]::Open($driverPath,"Open","Read","None")
+    $failed=$false
+    try { Remove-GGInstallation $install } catch { $failed=$_.Exception.Message -match 'GGSystemMonitor.sys.*Restart Windows' }
+    finally { $lock.Dispose() }
+    Assert ($failed -and (Test-Path -LiteralPath (Join-Path $install 'Uninstall.bat'))) "Locked legacy driver reports incomplete uninstall and keeps its launcher"
+    Assert ((Test-Path -LiteralPath $regKey) -and $script:taskPresent) "Legacy driver failure leaves registration and task intact"
+    Remove-GGInstallation $install
+    Assert (-not (Test-Path -LiteralPath $install)) "Uninstall retry succeeds after legacy lock is released"
     New-Item -ItemType Directory -Path $install,$regKey | Out-Null
     [IO.File]::WriteAllText((Join-Path $install $ExeName), "fixture")
     $lock = [IO.File]::Open((Join-Path $install $ExeName), "Open", "Read", "None")
@@ -127,10 +152,22 @@ function Set-ItemProperty { param($Path,$Name,$Value,$Type) }
     Assert ($completed.StageCount -ge 7 -and $completed.Result.Notice -eq "Simulated PawnIO conflict") "Background setup returns stage progress and preserves the nonfatal notice"
     Assert ((Get-Content -LiteralPath (Join-Path $target $ExeName) -Raw).Trim() -eq "new version") "Background update actually replaces the payload"
     Assert ((Get-Content -LiteralPath (Join-Path $target "settings.json") -Raw).Trim() -eq "user settings") "Background update preserves settings"
+    $oldDriver=Join-Path $target 'GGSystemMonitor.sys'
+    Set-Content -LiteralPath $oldDriver 'old legacy file'
+    Set-Content -LiteralPath (Join-Path $source 'GGSystemMonitor.sys') 'must not be copied'
+    Set-Content -LiteralPath (Join-Path $target 'other.sys') 'do not remove'
+    $locked=[IO.File]::Open($oldDriver,"Open","Read","None")
+    try { $completed=Invoke-TestSetup $false } finally { $locked.Dispose() }
+    Assert ($completed.Result.Notice -match 'Legacy driver cleanup is incomplete.*GGSystemMonitor.sys') "Update completes with warning when the obsolete driver cannot be deleted"
+    Assert (((Get-Content -LiteralPath $oldDriver -Raw).Trim() -eq 'old legacy file') -and (Test-Path -LiteralPath (Join-Path $target 'other.sys'))) "Update does not copy legacy driver or touch unrelated drivers"
+    $completed=Invoke-TestSetup $false
+    Assert (-not (Test-Path -LiteralPath $oldDriver)) "Update retries and removes obsolete driver after the lock clears"
     Write-Host "PASS TOTAL $count installer lifecycle tests"
 } finally {
     $env:LOCALAPPDATA=$oldLocal
-    if ((Split-Path $temp -Leaf) -like "GGSystemMonitor-lifecycle-*") {
-        Remove-Item -LiteralPath $temp -Recurse -Force
+    $resolved = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $temp).ProviderPath)
+    if ($resolved -eq $temp -and (Split-Path $resolved -Parent) -eq $tempRoot -and
+        (Split-Path $resolved -Leaf) -like "GGSystemMonitor-lifecycle-*") {
+        Remove-Item -LiteralPath $resolved -Recurse -Force
     }
 }

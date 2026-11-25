@@ -34,12 +34,13 @@ namespace GGSystemMonitor
         private void PopulateHardwareCombo(ComboBox devices, ComboBox sensors, Program.LineItem item)
         {
             devices.Items.Clear();
-            devices.Items.Add(new HardwareChoice { Id = "", Name = "Device: Auto (prefers discrete GPU)" });
+            bool cpu = ProgramType(item);
+            devices.Items.Add(new HardwareChoice { Id = "", Name = cpu ? "Auto (default CPU)" : "Auto (prefers discrete GPU)" });
             try
             {
                 var inventory = JObject.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "hardware.json")));
-                var entries = (inventory["Devices"] as JArray ?? new JArray()).OfType<JObject>().Where(d => ProgramType(item) ? (string)d["Type"] == "Cpu" : ((string)d["Type"] ?? "").StartsWith("Gpu")).ToArray();
-                foreach (var d in entries) devices.Items.Add(new HardwareChoice { Id = (string)d["Id"], Name = "Device: " + (string)d["Name"] });
+                var entries = (inventory["Devices"] as JArray ?? new JArray()).OfType<JObject>().Where(d => cpu ? (string)d["Type"] == "Cpu" : ((string)d["Type"] ?? "").StartsWith("Gpu")).ToArray();
+                foreach (var d in entries) devices.Items.Add(new HardwareChoice { Id = (string)d["Id"], Name = (string)d["Name"] });
                 devices.SelectedIndex = 0;
                 for (int i = 1; i < devices.Items.Count; i++) if (((HardwareChoice)devices.Items[i]).Id == item.HardwareId) devices.SelectedIndex = i;
                 if (!string.IsNullOrEmpty(item.HardwareId) && devices.SelectedIndex == 0)
@@ -50,7 +51,7 @@ namespace GGSystemMonitor
                 var resolved = entries.FirstOrDefault(d => (string)d["Id"] == item.HardwareId);
                 if (string.IsNullOrEmpty(item.HardwareId))
                 {
-                    string autoName = (string)inventory[ProgramType(item) ? "CpuName" : "GpuName"];
+                    string autoName = (string)inventory[cpu ? "CpuName" : "GpuName"];
                     resolved = entries.FirstOrDefault(d => (string)d["Name"] == autoName);
                 }
                 sensors.Items.Clear(); sensors.Items.Add("(Auto)");

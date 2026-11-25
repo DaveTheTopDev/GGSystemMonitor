@@ -121,7 +121,12 @@ function Get-ExistingInstallDir {
 
     foreach ($candidate in ($candidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
         try {
+            # Stale registration pointing at an unavailable share can stall setup
+            # even before its background worker starts.
+            if ($candidate -notmatch '^[A-Za-z]:\\') { continue }
             $dir = [System.IO.Path]::GetFullPath($candidate).TrimEnd('\')
+            $drive = New-Object IO.DriveInfo([IO.Path]::GetPathRoot($dir))
+            if ($drive.DriveType -notin @('Fixed', 'Removable')) { continue }
             if ((Test-Path -LiteralPath (Join-Path $dir $ExeName) -PathType Leaf) -and
                 ((Test-Path $UninstallRegKey) -or (Test-Path -LiteralPath (Join-Path $dir "Uninstall.bat") -PathType Leaf))) {
                 return $dir
@@ -464,9 +469,10 @@ $poll.Add_Tick({
         $notice = $script:installResult.Notice
         if ($script:installResult.RestartRequired) { $notice += " Restart Windows to finish installing prerequisites. Setup will not force a restart." }
         Write-SetupLog $notice
-        $lblBannerText.Text += if ($script:installResult.RestartRequired) { " Restart required." } else { " See the prerequisite notice." }
+        $lblBannerText.Text += if ($script:installResult.RestartRequired) { " Restart required." } else { " See setup notice." }
         [Windows.Forms.MessageBox]::Show($form, $notice.Trim(), "Setup Complete", "OK", "Information") | Out-Null
-    } else { $closeTimer.Start() }
+    }
+    if (-not $script:installResult.RestartRequired) { $closeTimer.Start() }
 })
 
 $form.ShowDialog() | Out-Null

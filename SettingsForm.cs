@@ -69,7 +69,9 @@ namespace GGSystemMonitor
             public decimal Rotation;
             public string  GgPath;
             public string  OledFont, OutputProfile;
+            public bool RotateTogether;
             public string  TopItemsJson, BottomItemsJson;
+            public string ActiveDisplayPreset, DisplayPresetLibrary;
         }
 
         // Temperature tab hardware-detection labels (updated by status timer)
@@ -92,7 +94,6 @@ namespace GGSystemMonitor
 
         // Display tab
         private ListBox       _topList,      _bottomList;
-        private ComboBox      _topAddCombo,  _bottomAddCombo;
         private ComboBox      _topSensorCombo,  _botSensorCombo;
         private Label         _topSensorLabel,  _botSensorLabel;
         private string[]      _cpuTempSensorNames = Array.Empty<string>();
@@ -190,6 +191,7 @@ namespace GGSystemMonitor
         private void EvaluateDirty()
         {
             if (_loading || _btnSave == null) return;
+            SelectEditedFactoryDraft();
             if (HasChanges()) MarkDirty();
             else ResetDirty();
         }
@@ -202,19 +204,25 @@ namespace GGSystemMonitor
             CapsLock        = _capsLockCheck.Checked,
             ShowUpdateNotif = _showUpdateCheck.Checked,
             Rotation        = _rotationNud.Value,
+            RotateTogether  = _rotateTogether.Checked,
             GgPath          = _ggPathBox.Text,
             OledFont        = _oledFontCombo?.SelectedIndex == 0 ? "" : _oledFontCombo?.SelectedItem?.ToString() ?? "",
             OutputProfile = _outputProfile?.SelectedItem?.ToString() ?? "",
             TopItemsJson    = SerializeItems(_topList),
             BottomItemsJson = SerializeItems(_bottomList),
+            ActiveDisplayPreset = _activeDisplayPreset,
+            DisplayPresetLibrary = System.Text.Json.JsonSerializer.Serialize(_displayPresets),
         };
 
         private bool HasChanges()
         {
             var cur = CaptureBaseline();
+            if (cur.ActiveDisplayPreset != _baseline.ActiveDisplayPreset ||
+                cur.DisplayPresetLibrary != _baseline.DisplayPresetLibrary) return true;
             if (cur.CapsLock        != _baseline.CapsLock)        return true;
             if (cur.ShowUpdateNotif != _baseline.ShowUpdateNotif) return true;
             if (cur.Rotation        != _baseline.Rotation)        return true;
+            if (cur.RotateTogether  != _baseline.RotateTogether)  return true;
             if (cur.GgPath          != _baseline.GgPath)          return true;
             if (cur.OutputProfile != _baseline.OutputProfile) return true;
             if (cur.OledFont        != _baseline.OledFont)        return true;
@@ -368,7 +376,7 @@ namespace GGSystemMonitor
             scrollTrack.Controls.Add(scrollThumb);
 
             // Viewport clips overflow; content panel scrolls within it
-            var viewport = new Panel { Dock = DockStyle.Fill, BackColor = BackColor };
+            var viewport = new Panel { Name = "DisplayViewport", Dock = DockStyle.Fill, BackColor = BackColor };
             var content  = new Panel { Location = Point.Empty, BackColor = BackColor };
             viewport.Controls.Add(content);
 
@@ -402,6 +410,17 @@ namespace GGSystemMonitor
                 UpdateScrollbar();
             }
 
+            void RevealSection(Control section)
+            {
+                if (!section.Visible || !scrollTrack.Visible) return;
+                var location = content.PointToClient(section.PointToScreen(Point.Empty));
+                if (location.Y < scrollOffset || section.Height >= viewport.ClientSize.Height)
+                    scrollOffset = location.Y;
+                else if (location.Y + section.Height > scrollOffset + viewport.ClientSize.Height)
+                    scrollOffset = location.Y + section.Height - viewport.ClientSize.Height + 8;
+                UpdateScrollbar();
+            }
+
             var tabTitle = new Label
             {
                 Text      = "OLED Display Settings",
@@ -425,20 +444,22 @@ namespace GGSystemMonitor
             btnHelp.FlatAppearance.BorderColor = Color.FromArgb(0, 120, 215);
             btnHelp.Click += (s, e) => ShowPlaceholderHelp();
 
-            var topGroup = BuildLineEditor("Top Line Items", out _topList, out _topAddCombo,
-                out _topSensorCombo, out _topSensorLabel, new Point(8, 34), Reflow,
-                () => _bottomList);
+            var presetRow = BuildPresetRow();
+            var topGroup = BuildLineEditor("Top Line Widgets", out _topList,
+                out _topSensorCombo, out _topSensorLabel, new Point(8, presetRow.Bottom + 10), Reflow,
+                () => _bottomList, RevealSection);
             topGroupRef = topGroup;
 
-            var botGroup = BuildLineEditor("Bottom Line Items", out _bottomList, out _bottomAddCombo,
+            var botGroup = BuildLineEditor("Bottom Line Widgets", out _bottomList,
                 out _botSensorCombo, out _botSensorLabel, new Point(8, topGroup.Bottom + 6), Reflow,
-                () => _topList);
+                () => _topList, RevealSection);
             botGroupRef = botGroup;
 
             var rotRow = new Panel
             {
+                Name     = "DisplayRotationOptions",
                 Location = new Point(8, botGroup.Bottom + 10),
-                Size     = new Size(460, 28)
+                Size     = new Size(460, 59)
             };
             rotRowRef = rotRow;
             rotRow.Controls.Add(new Label { Text = "Rotation interval:", AutoSize = true, Location = new Point(0, 5) });
@@ -454,7 +475,7 @@ namespace GGSystemMonitor
             rotRow.Controls.Add(_rotationNud);
             rotRow.Controls.Add(new Label
             {
-                Text      = "ms  (fallback when item Duration is 0)",
+                Text      = "ms  (fallback when widget duration is 0)",
                 AutoSize  = true,
                 Location  = new Point(210, 5),
                 ForeColor = Color.Gray
@@ -462,11 +483,35 @@ namespace GGSystemMonitor
 
             content.Controls.Add(tabTitle);
             content.Controls.Add(btnHelp);
+            content.Controls.Add(presetRow);
             content.Controls.Add(topGroup);
             content.Controls.Add(botGroup);
+            _rotateTogether = new CheckBox
+            {
+                Name = "RotateLinesTogether", Text = "Rotate lines together", AutoSize = true,
+                Location = new Point(0, 33), Checked = true
+            };
+            const string rotationHint = "Keeps both lines in sync. Each widget pair stays on-screen for the longer of its two durations.";
+            var rotationInfo = CreateBlueInfoButton(new Point(_rotateTogether.Right + 8, 31));
+            rotationInfo.Name = "RotationInfo";
+            rotationInfo.AccessibleName = "About synchronized rotation";
+            rotationInfo.AccessibleDescription = rotationHint;
+            rotationInfo.TabStop = true;
+            var hint = new ToolTip
+            {
+                InitialDelay = 250, ReshowDelay = 100, AutoPopDelay = 10000, UseAnimation = true, UseFading = true
+            };
+            hint.SetToolTip(rotationInfo, rotationHint);
+            rotationInfo.Click += (s, e) => hint.Show(rotationHint, rotationInfo, 0, rotationInfo.Height + 4, 10000);
+            rotationInfo.MouseLeave += (s, e) => hint.Hide(rotationInfo);
+            rotationInfo.LostFocus += (s, e) => hint.Hide(rotationInfo);
+            rotationInfo.Disposed += (s, e) => hint.Dispose();
+            _rotateTogether.SizeChanged += (s, e) => rotationInfo.Left = _rotateTogether.Right + 8;
+            rotRow.Controls.Add(_rotateTogether);
+            rotRow.Controls.Add(rotationInfo);
             content.Controls.Add(rotRow);
 
-            // Mouse wheel via message filter so it works regardless of which child has focus
+            // Route the wheel by what is under the pointer, not by keyboard focus.
             var wheelFilter = new ScrollWheelFilter(viewport, delta =>
             {
                 if (!scrollTrack.Visible) return;
@@ -530,15 +575,33 @@ namespace GGSystemMonitor
             return tab;
         }
 
-        private GroupBox BuildLineEditor(string title, out ListBox list, out ComboBox addCombo,
+        private GroupBox BuildLineEditor(string title, out ListBox list,
             out ComboBox sensorCombo, out Label sensorLabel, Point location, Action onResize = null,
-            Func<ListBox> getOtherList = null)
+            Func<ListBox> getOtherList = null, Action<Control> revealSection = null)
         {
-            const int CollapseH = 158;
-            var group = new GroupBox { Text = title, Location = location, Size = new Size(476, CollapseH) };
-
-            var localList = new ListBox
+            const int CollapseH = 128;
+            bool isTop = title.StartsWith("Top", StringComparison.Ordinal);
+            var group = new GroupBox
             {
+                Text = title, Location = location, Size = new Size(476, CollapseH),
+                BackColor = isTop ? Color.FromArgb(198, 219, 245) : Color.FromArgb(221, 205, 240)
+            };
+            var lineTitleFont = new Font(Font.FontFamily, Font.Size + 1, FontStyle.Bold);
+            group.Font = lineTitleFont;
+            group.Disposed += (s, e) => lineTitleFont.Dispose();
+            var selectedSettings = new Panel
+            {
+                Name = isTop ? "TopSelectedWidget" : "BottomSelectedWidget",
+                Visible = false,
+                Font = Font,
+                BackColor = isTop ? Color.FromArgb(150, 183, 226) : Color.FromArgb(185, 157, 218)
+            };
+
+            var localList = new WidgetListBox
+            {
+                Name          = isTop ? "TopWidgetList" : "BottomWidgetList",
+                AccessibleName = title,
+                AccessibleDescription = "Right-click or press Shift+F10 for widget actions.",
                 Location      = new Point(8, 18),
                 Size          = new Size(348, 100),
                 SelectionMode = SelectionMode.One,
@@ -548,26 +611,23 @@ namespace GGSystemMonitor
             localList.DrawItem += DrawLineItem;
             list = localList;
 
-            var btnUp     = SmallBtn("▲",      364, 18);
-            var btnDown   = SmallBtn("▼",      364, 46);
-            var btnRemove = SmallBtn("Remove", 364, 80);
+            var btnAdd = SmallBtn("", 364, 18);
+            btnAdd.Name = isTop ? "AddTopWidget" : "AddBottomWidget";
+            btnAdd.AccessibleName = isTop ? "Add widget to top line" : "Add widget to bottom line";
+            btnAdd.Paint += (s, e) => DrawAddWidgetGlyph(btnAdd, e.Graphics);
+            var btnUp = SmallBtn("▲", 364, 50);
+            var btnDown = SmallBtn("▼", 418, 50);
+            btnUp.Width = btnDown.Width = 50;
+            var btnRemove = SmallBtn("Remove", 364, 82);
+            var lineAccent = isTop ? Color.FromArgb(44, 92, 147) : Color.FromArgb(104, 69, 138);
+            SetWidgetButtonFill(btnAdd, lineAccent);
+            SetWidgetButtonFill(btnUp, lineAccent);
+            SetWidgetButtonFill(btnDown, lineAccent);
+            SetWidgetButtonFill(btnRemove, Color.FromArgb(152, 49, 62));
+            btnUp.AccessibleName = "Move widget up";
+            btnDown.AccessibleName = "Move widget down";
 
-            btnUp.Click     += (s, e) => { MoveItem(localList, -1); EvaluateDirty(); };
-            btnDown.Click   += (s, e) => { MoveItem(localList, +1); EvaluateDirty(); };
-            btnRemove.Click += (s, e) => { RemoveItem(localList);   EvaluateDirty(); };
-
-            var localCombo = new ComboBox
-            {
-                Location      = new Point(8, 126),
-                Size          = new Size(240, 22),
-                DropDownStyle = ComboBoxStyle.DropDownList
-            };
-            localCombo.Items.AddRange(DisplayNames.Values.ToArray());
-            localCombo.SelectedIndex = 0;
-            addCombo = localCombo;
-
-            var btnAdd = new Button { Text = "Add", Location = new Point(255, 124), Size = new Size(55, 24) };
-            btnAdd.Click += (s, e) => { AddItem(localList, localCombo); EvaluateDirty(); };
+            WireWidgetListMenus(localList, btnAdd, btnUp, btnDown, btnRemove);
 
             // ---- Per-item editing rows ----
             var scrollWarnLabel = new Label
@@ -575,7 +635,7 @@ namespace GGSystemMonitor
                 Text      = "Text is too long (max 15 chars) - Will auto-scroll",
                 AutoSize  = true,
                 Location  = new Point(55, 153),
-                ForeColor = Color.FromArgb(210, 100, 0),
+                ForeColor = Color.FromArgb(153, 68, 0),
                 Visible   = false
             };
             var lblSel   = new Label { Text = "Label:", AutoSize = true, Location = new Point(8, 177), ForeColor = Color.Gray };
@@ -621,7 +681,7 @@ namespace GGSystemMonitor
             btnInfo.MouseUp    += (s, e) => { infoDown  = false; btnInfo.Invalidate(); };
             btnInfo.Click += (s, e) => { var sel = localList.SelectedItem as LineItem; if (sel != null) ShowItemPlaceholderHelp(sel.Type); };
 
-            var lblDur   = new Label { Text = "Duration:", AutoSize = true, Location = new Point(313, 177), ForeColor = Color.Gray };
+            var lblDur   = new Label { Text = "Duration (ms)", AutoSize = true, ForeColor = WidgetMuted };
             var nudDur   = new NumericUpDown
             {
                 Location  = new Point(378, 173),
@@ -669,7 +729,6 @@ namespace GGSystemMonitor
             };
             bool suppressSensor = false;
             var deviceCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 390, Height = 22, Left = 60, Top = 250, Visible = false };
-            group.Controls.Add(deviceCombo);
             void PopulateDevice()
             {
                 var selectedItem = localList.SelectedItem as LineItem;
@@ -686,9 +745,9 @@ namespace GGSystemMonitor
                 suppressSensor = true;
                 PopulateHardwareCombo(deviceCombo, localSensorCombo, item);
                 suppressSensor = false;
+                WidgetThresholdContextChanged?.Invoke();
                 EvaluateDirty();
             };
-            localList.SelectedIndexChanged += (sender, args) => PopulateDevice();
             sensorCombo = localSensorCombo;
             sensorLabel = localSensorLabel;
 
@@ -697,12 +756,52 @@ namespace GGSystemMonitor
             var chkNpOther    = new CheckBox { Text = "Media Player", AutoSize = true, Location = new Point(175, 199), Visible = false, Checked = true };
             var lblNotPlaying     = new Label  { Text = "Not Playing:", AutoSize = true, Location = new Point(8, 227),   ForeColor = Color.Gray, Visible = false };
             var txtNotPlaying     = new TextBox { Location = new Point(82, 223), Size = new Size(234, 22), Visible = false };
-            var chkSkipNotPlaying = new CheckBox { Text = "Skip rotation when no media is playing", AutoSize = true, Location = new Point(8, 249), Visible = false };
 
             bool suppressLabel   = false;
             bool suppressRefresh = false;
 
-            bool warnRowVisible  = false;
+            var widgetSection = NewWidgetSection("WidgetSpecificSettings");
+            var widgetTitle = WidgetSectionTitle("");
+            var deviceLabel = new Label { Text = "Device", AutoSize = true, ForeColor = WidgetMuted };
+            var sourcesLabel = new Label { Text = "Sources", AutoSize = true, ForeColor = WidgetMuted };
+            widgetSection.Controls.AddRange(new Control[] { widgetTitle, deviceLabel, deviceCombo, localSensorLabel,
+                localSensorCombo, chkFahrenheit, chkRamMb, sourcesLabel, chkNpSpotify, chkNpYouTube, chkNpOther,
+                lblNotPlaying, txtNotPlaying });
+
+            var extrasSection = NewWidgetSection("WidgetExtraSettings");
+            var extrasTitle = WidgetSectionTitle("Polling and warnings");
+            extrasSection.Controls.Add(extrasTitle);
+            var appearance = NewWidgetSection(isTop ? "TopWidgetEditor" : "BottomWidgetEditor");
+            var appearanceTitle = WidgetSectionTitle("OLED display settings");
+            appearance.Controls.AddRange(new Control[] { appearanceTitle, scrollWarnLabel, lblSel, txtLabel, btnInfo, lblDur, nudDur });
+            lblSel.Text = "Label";
+            lblSel.ForeColor = WidgetMuted;
+            localSensorLabel.Text = "Sensor";
+            localSensorLabel.ForeColor = WidgetMuted;
+            deviceCombo.AccessibleName = "Hardware device";
+            localSensorCombo.AccessibleName = "Temperature sensor";
+            lblNotPlaying.Text = "Fallback";
+            lblNotPlaying.ForeColor = WidgetMuted;
+            txtNotPlaying.AccessibleName = "Fallback text when no media is available";
+            btnInfo.AccessibleName = "Label format help";
+            btnInfo.TabStop = true;
+            btnInfo.BackColor = btnInfo.FlatAppearance.MouseOverBackColor = btnInfo.FlatAppearance.MouseDownBackColor = WidgetSectionFill;
+            nudDur.AccessibleName = "Widget duration in milliseconds";
+            nudDur.AccessibleDescription = "Enter 0 to use the display rotation interval.";
+            txtLabel.AccessibleName = "OLED widget label";
+
+            bool warnRowVisible = false;
+            Panel prioritySection = null, fontRows = null;
+            string TemperatureDevice()
+            {
+                if (deviceCombo.SelectedItem is HardwareChoice choice && !string.IsNullOrEmpty(choice.Id) &&
+                    !choice.Name.StartsWith("Unavailable:", StringComparison.Ordinal)) return choice.Name;
+                return NormType(localList.SelectedItem as LineItem) == "cputemperature" ? _detectedCpuName : _detectedGpuName;
+            }
+            var widgetEditor = BuildWidgetEditor(localList, UpdateHeight, isTop, revealSection, TemperatureDevice);
+            prioritySection = widgetEditor.Priority;
+            fontRows = widgetEditor.FontRows;
+            appearance.Controls.Add(fontRows);
 
             void SetWarnRowVisible(bool visible)
             {
@@ -725,12 +824,12 @@ namespace GGSystemMonitor
                     chkFahrenheit.Visible = chkRamMb.Visible = false;
                     localSensorCombo.Visible = localSensorLabel.Visible = false;
                     btnInfo.Visible = btnInfo.Enabled = false;
-                    lblNotPlaying.Visible = txtNotPlaying.Visible = chkSkipNotPlaying.Visible = false;
+                    lblNotPlaying.Visible = txtNotPlaying.Visible = false;
                     chkNpSpotify.Visible = chkNpYouTube.Visible = chkNpOther.Visible = false;
                     HideExtPanel(_cpuTempExtPanel, ref _cpuTempHost, group);
                     HideExtPanel(_gpuTempExtPanel, ref _gpuTempHost, group);
                     HideExtPanel(_weatherExtPanel, ref _weatherHost, group);
-                    UpdateHeight();
+                    widgetEditor.Refresh();
                     return;
                 }
 
@@ -746,7 +845,7 @@ namespace GGSystemMonitor
                 chkRamMb.Visible      = isRam;
                 chkRamMb.Enabled      = isRam;
 
-                lblNotPlaying.Visible = txtNotPlaying.Visible = chkSkipNotPlaying.Visible = isNowPlaying;
+                lblNotPlaying.Visible = txtNotPlaying.Visible = isNowPlaying;
                 chkNpSpotify.Visible = chkNpYouTube.Visible = chkNpOther.Visible = isNowPlaying;
 
                 // Populate sensor combo for the selected temperature type
@@ -771,7 +870,6 @@ namespace GGSystemMonitor
                 if (isNowPlaying)
                 {
                     txtNotPlaying.Text        = item.NotPlayingText ?? "Not Playing";
-                    chkSkipNotPlaying.Checked = item.SkipIfNotPlaying;
                     chkNpSpotify.Checked      = item.NowPlayingSpotify;
                     chkNpYouTube.Checked      = item.NowPlayingYouTube;
                     chkNpOther.Checked        = item.NowPlayingOtherPlayer;
@@ -789,20 +887,20 @@ namespace GGSystemMonitor
                 suppressLabel = false;
                 lblSel.Visible = txtLabel.Visible = lblDur.Visible = nudDur.Visible = true;
                 txtLabel.Enabled = nudDur.Enabled = true;
-                lblSel.ForeColor = lblDur.ForeColor = Color.Black;
                 SetWarnRowVisible(EstimateRenderedLength(txtLabel.Text, item.Type) > 15);
                 btnInfo.Visible = btnInfo.Enabled = (norm != "text");
 
                 // Show/hide type-specific ext panels and populate with per-item values
-                if (norm == "cputemperature") { ShowExtPanel(_cpuTempExtPanel, ref _cpuTempHost, group, getOtherList); PopulateCpuExtPanel(item); }
+                if (norm == "cputemperature") { ShowExtPanel(_cpuTempExtPanel, ref _cpuTempHost, group, extrasSection, getOtherList); PopulateCpuExtPanel(item); }
                 else                          HideExtPanel(_cpuTempExtPanel, ref _cpuTempHost, group);
-                if (norm == "gputemperature") { ShowExtPanel(_gpuTempExtPanel, ref _gpuTempHost, group, getOtherList); PopulateGpuExtPanel(item); }
+                if (norm == "gputemperature") { ShowExtPanel(_gpuTempExtPanel, ref _gpuTempHost, group, extrasSection, getOtherList); PopulateGpuExtPanel(item); }
                 else                          HideExtPanel(_gpuTempExtPanel, ref _gpuTempHost, group);
-                if (norm == "weather")        { ShowExtPanel(_weatherExtPanel, ref _weatherHost,  group, getOtherList); PopulateWeatherExtPanel(item); }
+                if (norm == "weather")        { ShowExtPanel(_weatherExtPanel, ref _weatherHost, group, widgetSection, getOtherList); PopulateWeatherExtPanel(item); }
                 else                          HideExtPanel(_weatherExtPanel, ref _weatherHost,  group);
 
                 PopulateDevice();
-                ApplyWarnShift(warnRowVisible);
+                widgetEditor.Refresh();
+                UpdateHeight();
             };
 
             localSensorCombo.SelectedIndexChanged += (s, e) =>
@@ -836,7 +934,7 @@ namespace GGSystemMonitor
                     suppressRefresh = false;
                 }
                 bool nowWarn = EstimateRenderedLength(val, item.Type) > 15;
-                if (warnRowVisible != nowWarn) { SetWarnRowVisible(nowWarn); ApplyWarnShift(warnRowVisible); }
+                if (warnRowVisible != nowWarn) { SetWarnRowVisible(nowWarn); UpdateHeight(); }
                 EvaluateDirty();
             };
 
@@ -855,6 +953,7 @@ namespace GGSystemMonitor
                 var item = localList.SelectedItem as LineItem;
                 if (item == null) return;
                 item.UseFahrenheit = chkFahrenheit.Checked;
+                widgetEditor.Refresh();
                 if (item.Label != null)
                 {
                     item.Label = chkFahrenheit.Checked
@@ -907,14 +1006,6 @@ namespace GGSystemMonitor
                 EvaluateDirty();
             };
 
-            chkSkipNotPlaying.CheckedChanged += (s, e) =>
-            {
-                if (suppressLabel) return;
-                var item = localList.SelectedItem as LineItem;
-                if (item == null) return;
-                item.SkipIfNotPlaying = chkSkipNotPlaying.Checked;
-                EvaluateDirty();
-            };
 
             chkNpSpotify.CheckedChanged += (s, e) =>
             {
@@ -941,83 +1032,126 @@ namespace GGSystemMonitor
                 EvaluateDirty();
             };
 
-            void ApplyWarnShift(bool warnVisible)
-            {
-                const int warningTop = 153;
-                const int labelTopWithoutWarning = 158;
-                const int labelTopWithWarning = 181;
-
-                int labelTop = warnVisible ? labelTopWithWarning : labelTopWithoutWarning;
-                scrollWarnLabel.Top  = warningTop;
-                scrollWarnLabel.Left = 55;
-
-                lblSel.Top  = labelTop + 4;
-                txtLabel.Top = labelTop;
-                btnInfo.Top  = labelTop;
-                lblDur.Top   = labelTop + 4;
-                nudDur.Top   = labelTop;
-
-                int optionTop = labelTop + 27;
-                chkFahrenheit.Top = optionTop;
-                chkRamMb.Top      = optionTop;
-                chkNpSpotify.Top  = optionTop;
-                chkNpYouTube.Top  = optionTop;
-                chkNpOther.Top    = optionTop;
-
-                int detailTop = optionTop + 28;
-                localSensorLabel.Top = detailTop + 4;
-                localSensorCombo.Top = detailTop;
-                lblNotPlaying.Top    = detailTop + 4;
-                txtNotPlaying.Top    = detailTop;
-
-                deviceCombo.Top = detailTop + 28;
-                chkSkipNotPlaying.Top = detailTop + 27;
-                UpdateHeight();
-            }
-
             void UpdateHeight()
             {
-                // During tab switches WinForms can report every child as not visible
-                // because the parent TabPage is hidden. Do not measure in that state.
-                if (!group.Visible)
+                // Child Visible is inherited from the tab; defer layout until the tab is visible.
+                if (!group.Visible) return;
+                int U(int n) => (int)Math.Round(n * localList.Width / 348.0);
+                int inset = U(12), gap = U(8);
+                int width = group.ClientSize.Width - 2 * U(8);
+                int bottom = Math.Max(localList.Bottom, btnRemove.Bottom);
+                int stackTop = gap;
+
+                void Place(Panel section)
                 {
-                    onResize?.Invoke();
-                    return;
+                    if (section == null || !section.Visible) return;
+                    section.SetBounds(U(6), stackTop, width, section.Height);
+                    stackTop = section.Bottom + gap;
                 }
 
-                // Find whichever ext panel (if any) is hosted by this group
-                Panel activeExt = null;
-                if (_cpuTempExtPanel != null && _cpuTempHost == group && _cpuTempExtPanel.Visible) activeExt = _cpuTempExtPanel;
-                else if (_gpuTempExtPanel != null && _gpuTempHost == group && _gpuTempExtPanel.Visible) activeExt = _gpuTempExtPanel;
-                else if (_weatherExtPanel != null && _weatherHost == group && _weatherExtPanel.Visible) activeExt = _weatherExtPanel;
-
-                // Compute bottom of all non-ext controls
-                int maxBottom = 0;
-                foreach (Control c in group.Controls)
-                    if (c.Visible && c != activeExt)
-                        maxBottom = Math.Max(maxBottom, c.Bottom);
-
-                // Position ext panel below all other content
-                if (activeExt != null)
+                void Field(Label label, Control input, int top, int x)
                 {
-                    activeExt.Location = new Point(8, maxBottom + 8);
-                    activeExt.Width    = Math.Max(1, group.ClientSize.Width - 16);
-                    maxBottom = activeExt.Bottom;
+                    label.Location = new Point(inset, top + U(3));
+                    input.SetBounds(U(x), top, width - U(x) - inset, input.Height);
                 }
 
-                int newH = maxBottom + 10;
-                if (group.Height == newH) { onResize?.Invoke(); return; }
-                group.Height = newH;
+                int BodyTop(Label heading) => heading.Bottom + U(7);
+                var item = localList.SelectedItem as LineItem;
+                selectedSettings.Visible = item != null;
+                string kind = NormType(item);
+                bool temperature = kind == "cputemperature" || kind == "gputemperature";
+                bool hardware = temperature || kind == "gpuusage";
+                bool weather = kind == "weather";
+                bool media = kind == "nowplaying";
+                bool ram = kind == "ramusage";
+                appearance.Visible = item != null;
+                if (appearance.Visible)
+                {
+                    int y = BodyTop(appearanceTitle);
+                    lblSel.Location = new Point(inset, y + U(3));
+                    nudDur.SetBounds(width - U(74), y, U(62), nudDur.Height);
+                    lblDur.Location = new Point(nudDur.Left - lblDur.Width - U(8), y + U(3));
+                    btnInfo.Location = new Point(lblDur.Left - btnInfo.Width - U(10), y);
+                    txtLabel.SetBounds(U(61), y, Math.Max(30, btnInfo.Left - U(66)), txtLabel.Height);
+                    scrollWarnLabel.Location = new Point(txtLabel.Left, txtLabel.Bottom + U(4));
+                    fontRows.Location = new Point(inset, (warnRowVisible ? scrollWarnLabel.Bottom : txtLabel.Bottom) + U(9));
+                    appearance.Height = fontRows.Bottom + U(7);
+                }
+                Place(appearance);
+                widgetSection.Visible = hardware || weather || media || ram;
+                if (widgetSection.Visible)
+                {
+                    widgetTitle.Text = media ? "Media playback" : weather ? "Weather source" :
+                        ram ? "Memory units" : temperature ? "Temperature source" : "Graphics source";
+                    int y = BodyTop(widgetTitle);
+                    deviceLabel.Visible = hardware;
+                    sourcesLabel.Visible = media;
+                    if (hardware)
+                    {
+                        Field(deviceLabel, deviceCombo, y, 68);
+                        y = deviceCombo.Bottom + U(6);
+                    }
+                    if (temperature)
+                    {
+                        Field(localSensorLabel, localSensorCombo, y, 68);
+                        y = localSensorCombo.Bottom + U(6);
+                    }
+                    if (media)
+                    {
+                        sourcesLabel.Location = new Point(inset, y + U(2));
+                        chkNpSpotify.Location = new Point(U(68), y);
+                        chkNpYouTube.Location = new Point(chkNpSpotify.Right + U(12), y);
+                        chkNpOther.Location = new Point(chkNpYouTube.Right + U(12), y);
+                        y = chkNpSpotify.Bottom + U(7);
+                        Field(lblNotPlaying, txtNotPlaying, y, 68);
+                        y = txtNotPlaying.Bottom;
+                    }
+                    if (weather && _weatherHost == group && _weatherExtPanel != null)
+                    {
+                        _weatherExtPanel.SetBounds(inset, y - U(5), width - 2 * inset, _weatherExtPanel.Height);
+                        _weatherLocationBox.Width = _weatherExtPanel.Width - _weatherLocationBox.Left;
+                        _weatherLocationSuggestionsList.Width = _weatherLocationBox.Width;
+                        _weatherLocationStatusLabel.Width = Math.Max(1, _weatherExtPanel.Width - _weatherLocationStatusLabel.Left);
+                        y = _weatherExtPanel.Bottom + U(4);
+                    }
+                    if (temperature || weather || ram)
+                    {
+                        var units = ram ? chkRamMb : chkFahrenheit;
+                        units.Location = new Point(inset, y);
+                        y = units.Bottom;
+                    }
+                    widgetSection.Height = y + inset;
+                }
+                Place(widgetSection);
+
+                Panel advanced = kind == "cputemperature" && _cpuTempHost == group ? _cpuTempExtPanel :
+                    kind == "gputemperature" && _gpuTempHost == group ? _gpuTempExtPanel : null;
+                extrasSection.Visible = advanced != null;
+                if (advanced != null)
+                {
+                    advanced.SetBounds(inset, BodyTop(extrasTitle) - U(5), width - 2 * inset, advanced.Height);
+                    foreach (var thresholds in advanced.Controls.OfType<GroupBox>()) thresholds.Width = advanced.Width;
+                    extrasSection.Height = advanced.Bottom + U(7);
+                }
+                Place(extrasSection);
+                Place(prioritySection);
+
+                if (selectedSettings.Visible)
+                {
+                    selectedSettings.SetBounds(U(2), bottom + gap, group.ClientSize.Width - 2 * U(2), stackTop);
+                    bottom = selectedSettings.Bottom;
+                }
+
+                int newH = bottom + U(10);
+                if (group.Height != newH) group.Height = newH;
                 onResize?.Invoke();
             }
 
-            group.Controls.AddRange(new Control[] { localList, btnUp, btnDown, btnRemove, localCombo, btnAdd, scrollWarnLabel, lblSel, txtLabel, btnInfo, lblDur, nudDur, chkFahrenheit, chkRamMb, localSensorLabel, localSensorCombo, chkNpSpotify, chkNpYouTube, chkNpOther, lblNotPlaying, txtNotPlaying, chkSkipNotPlaying });
-
-            // Start collapsed — hide per-item controls until a widget is selected
-            lblSel.Visible = txtLabel.Visible = lblDur.Visible = nudDur.Visible = false;
-
-            // Register so ext-panel height changes (e.g. paste gap NUD) can propagate up
-            _lineEditorUpdateHeightCallbacks.Add(() => ApplyWarnShift(warnRowVisible));
+            selectedSettings.Controls.AddRange(new Control[] { appearance, widgetSection, extrasSection, prioritySection });
+            foreach (Control control in new Control[] { localList, btnAdd, btnUp, btnDown, btnRemove })
+                control.Font = Font;
+            group.Controls.AddRange(new Control[] { localList, btnAdd, btnUp, btnDown, btnRemove, selectedSettings });
+            _lineEditorUpdateHeightCallbacks.Add(UpdateHeight);
 
             return group;
         }
@@ -1103,8 +1237,7 @@ namespace GGSystemMonitor
             _gpuDefaultCrit   = GetGpuAutoCritical(_detectedGpuName);
 
             // ── CPU Temperature ext panel ──────────────────────────────
-            _cpuTempExtPanel = new Panel { BackColor = Color.FromArgb(237, 237, 242) };
-            _cpuTempExtPanel.Controls.Add(new Panel { Height = 1, Dock = DockStyle.Top, BackColor = Color.FromArgb(200, 200, 210) });
+            _cpuTempExtPanel = new Panel { BackColor = WidgetSectionFill };
 
             _cpuAvBlockedRow = new Panel
             {
@@ -1158,6 +1291,7 @@ namespace GGSystemMonitor
                 if (item == null) return;
                 item.WarnTemp = _cpuAutoCheck.Checked ? "AUTO" : ((int)_cpuWarnNud.Value).ToString();
                 item.CritTemp = _cpuAutoCheck.Checked ? "AUTO" : ((int)_cpuCritNud.Value).ToString();
+                WidgetThresholdContextChanged?.Invoke();
                 EvaluateDirty();
             };
             _cpuWarnNud.ValueChanged += (s, e) =>
@@ -1165,6 +1299,7 @@ namespace GGSystemMonitor
                 if (_suppressExtPopulate || _cpuAutoCheck.Checked) return;
                 var item = GetSelectedCpuItem();
                 if (item != null) item.WarnTemp = ((int)_cpuWarnNud.Value).ToString();
+                WidgetThresholdContextChanged?.Invoke();
                 EvaluateDirty();
             };
             _cpuCritNud.ValueChanged += (s, e) =>
@@ -1172,6 +1307,7 @@ namespace GGSystemMonitor
                 if (_suppressExtPopulate || _cpuAutoCheck.Checked) return;
                 var item = GetSelectedCpuItem();
                 if (item != null) item.CritTemp = ((int)_cpuCritNud.Value).ToString();
+                WidgetThresholdContextChanged?.Invoke();
                 EvaluateDirty();
             };
 
@@ -1186,8 +1322,7 @@ namespace GGSystemMonitor
             };
 
             // ── GPU Temperature ext panel ──────────────────────────────
-            _gpuTempExtPanel = new Panel { BackColor = Color.FromArgb(237, 237, 242) };
-            _gpuTempExtPanel.Controls.Add(new Panel { Height = 1, Dock = DockStyle.Top, BackColor = Color.FromArgb(200, 200, 210) });
+            _gpuTempExtPanel = new Panel { BackColor = WidgetSectionFill };
 
             var gpuPollRow = new Panel { Location = new Point(0, 8), Size = new Size(460, 26) };
             gpuPollRow.Controls.Add(new Label { Text = "Temperature poll interval:", AutoSize = true, Location = new Point(0, 4) });
@@ -1243,6 +1378,7 @@ namespace GGSystemMonitor
                 if (item == null) return;
                 item.WarnTemp = _gpuAutoCheck.Checked ? "AUTO" : ((int)_gpuWarnNud.Value).ToString();
                 item.CritTemp = _gpuAutoCheck.Checked ? "AUTO" : ((int)_gpuCritNud.Value).ToString();
+                WidgetThresholdContextChanged?.Invoke();
                 EvaluateDirty();
             };
             _gpuWarnNud.ValueChanged += (s, e) =>
@@ -1250,6 +1386,7 @@ namespace GGSystemMonitor
                 if (_suppressExtPopulate || _gpuAutoCheck.Checked) return;
                 var item = GetSelectedGpuItem();
                 if (item != null) item.WarnTemp = ((int)_gpuWarnNud.Value).ToString();
+                WidgetThresholdContextChanged?.Invoke();
                 EvaluateDirty();
             };
             _gpuCritNud.ValueChanged += (s, e) =>
@@ -1257,6 +1394,7 @@ namespace GGSystemMonitor
                 if (_suppressExtPopulate || _gpuAutoCheck.Checked) return;
                 var item = GetSelectedGpuItem();
                 if (item != null) item.CritTemp = ((int)_gpuCritNud.Value).ToString();
+                WidgetThresholdContextChanged?.Invoke();
                 EvaluateDirty();
             };
 
@@ -1307,8 +1445,7 @@ namespace GGSystemMonitor
             };
 
             // ── Weather ext panel ──────────────────────────────────────
-            _weatherExtPanel = new Panel { BackColor = Color.FromArgb(237, 237, 242) };
-            _weatherExtPanel.Controls.Add(new Panel { Height = 1, Dock = DockStyle.Top, BackColor = Color.FromArgb(200, 200, 210) });
+            _weatherExtPanel = new Panel { BackColor = WidgetSectionFill };
             _weatherExtPanel.Controls.Add(new Label { Text = "Location:", AutoSize = true, Location = new Point(0, 10) });
             _weatherLocationBox = new TextBox { Location = new Point(70, 6), Size = new Size(380, 22) };
             _weatherLocationBox.HandleCreated += (s, e) => SetPlaceholder(_weatherLocationBox, "City, postcode, or lat,lon");
@@ -1436,7 +1573,7 @@ namespace GGSystemMonitor
             bool clampGuard = false;
             void CheckClamp()
             {
-                if (clampGuard || _loading) return;
+                if (clampGuard || _loading || _suppressExtPopulate) return;
                 if (localCritNud.Value <= localWarnNud.Value)
                 {
                     clampGuard = true;
@@ -1460,8 +1597,13 @@ namespace GGSystemMonitor
                 if (isAuto)
                 {
                     // Read current defaults at toggle time so stale closure values don't apply
-                    localWarnNud.Value = Clamp(localWarnNud, (decimal)getDefaultWarn());
-                    localCritNud.Value = Clamp(localCritNud, (decimal)getDefaultCrit());
+                    clampGuard = true;
+                    try
+                    {
+                        localWarnNud.Value = Clamp(localWarnNud, (decimal)getDefaultWarn());
+                        localCritNud.Value = Clamp(localCritNud, (decimal)getDefaultCrit());
+                    }
+                    finally { clampGuard = false; }
                 }
                 EvaluateDirty();
             };
@@ -1723,7 +1865,9 @@ namespace GGSystemMonitor
             if (_weatherLocationHintLabel != null) _weatherLocationHintLabel.Visible = !showSuggestions;
             if (_weatherLocationStatusLabel != null) _weatherLocationStatusLabel.Visible = !showSuggestions;
 
-            int targetHeight = showSuggestions ? _weatherLocationSuggestionsList.Bottom + 4 : 52;
+            int bodyBottom = showSuggestions ? _weatherLocationSuggestionsList.Bottom :
+                Math.Max(_weatherLocationHintLabel?.Bottom ?? 0, _weatherLocationStatusLabel?.Bottom ?? 0);
+            int targetHeight = bodyBottom + 4;
             if (_weatherExtPanel.Height == targetHeight) return;
 
             _weatherExtPanel.Height = targetHeight;
@@ -1909,7 +2053,7 @@ namespace GGSystemMonitor
         // ----------------------------------------------------------------
         //  Ext panel host management
         // ----------------------------------------------------------------
-        private void ShowExtPanel(Panel extPanel, ref GroupBox host, GroupBox target, Func<ListBox> getOtherList)
+        private void ShowExtPanel(Panel extPanel, ref GroupBox host, GroupBox target, Panel section, Func<ListBox> getOtherList)
         {
             if (extPanel == null) return;
             if (host == target) { extPanel.Visible = true; return; }
@@ -1926,7 +2070,7 @@ namespace GGSystemMonitor
             {
                 host = target;
             }
-            extPanel.Parent  = target;
+            extPanel.Parent  = section;
             extPanel.Visible = true;
         }
 
@@ -2014,6 +2158,35 @@ namespace GGSystemMonitor
         private static Button SmallBtn(string text, int x, int y) =>
             new Button { Text = text, Location = new Point(x, y), Size = new Size(104, 26) };
 
+        private static void DrawAddWidgetGlyph(Button button, Graphics graphics)
+        {
+            float scale = button.ClientSize.Height / 26f;
+            int size = Math.Max(6, 2 * (int)Math.Round(5 * scale));
+            int stroke = Math.Max(2, 2 * (int)Math.Round(scale));
+            int x = (button.ClientSize.Width - size) / 2;
+            int y = (button.ClientSize.Height - size) / 2;
+            int inset = (size - stroke) / 2;
+            using (var brush = new SolidBrush(button.ForeColor))
+            {
+                graphics.FillRectangle(brush, x + inset, y, stroke, size);
+                graphics.FillRectangle(brush, x, y + inset, size, stroke);
+            }
+        }
+
+        private static void SetWidgetButtonFill(Button button, Color fill)
+        {
+            button.UseVisualStyleBackColor = false;
+            button.FlatStyle = FlatStyle.Flat;
+            button.ForeColor = Color.White;
+            var disabledFill = Color.FromArgb((fill.R + 3 * 255) / 4, (fill.G + 3 * 255) / 4, (fill.B + 3 * 255) / 4);
+            void UpdateFill() => button.BackColor = button.Enabled ? fill : disabledFill;
+            button.EnabledChanged += (s, e) => UpdateFill();
+            UpdateFill();
+            button.FlatAppearance.BorderSize = 0;
+            button.FlatAppearance.MouseOverBackColor = ControlPaint.Dark(fill, .12f);
+            button.FlatAppearance.MouseDownBackColor = ControlPaint.Dark(fill, .25f);
+        }
+
         private void DrawLineItem(object sender, DrawItemEventArgs e)
         {
             if (e.Index < 0) return;
@@ -2021,13 +2194,15 @@ namespace GGSystemMonitor
             var list = sender as ListBox;
             var item = list?.Items[e.Index] as LineItem;
             string text = item?.ListDisplayName ?? list?.Items[e.Index]?.ToString() ?? "";
+            if (item?.Hidden == true) text = "Hidden: " + text;
             bool selected = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
             bool blockedCpuTemp = _cpuTemperatureBlockedByAv && NormType(item) == "cputemperature";
 
             Color back = selected ? SystemColors.Highlight : list?.BackColor ?? Color.White;
             Color fore = selected ? SystemColors.HighlightText : list?.ForeColor ?? Color.Black;
-            if (blockedCpuTemp)
-                fore = selected ? Color.FromArgb(220, 220, 225) : Color.FromArgb(135, 135, 145);
+            if (item?.Hidden == true || blockedCpuTemp)
+                fore = SystemInformation.HighContrast ? SystemColors.GrayText :
+                    selected ? Color.FromArgb(224, 228, 235) : Color.FromArgb(130, 133, 141);
 
             using (var br = new SolidBrush(back))
                 e.Graphics.FillRectangle(br, e.Bounds);
@@ -2349,7 +2524,7 @@ namespace GGSystemMonitor
 
             int y = 12;
             int cW = W - padX * 2 - 18;
-            string note = "The default option uses the keyboard's native OLED font. Custom fonts are rendered as bitmap images. Some characters and symbols may visually change, use fallback glyphs, or appear simpler depending on the selected font.";
+            string note = "The widget-only Native font ignores the General font setting. All-native presets use the real keyboard font. Mixed presets use a compact pixel match for native rows; some symbols may look different.";
             var noteSize = TextRenderer.MeasureText(note, frm.Font, new Size(cW, 2000), TextFormatFlags.WordBreak);
             content.Controls.Add(new Label
             {
@@ -2763,41 +2938,6 @@ namespace GGSystemMonitor
             frm.Activate();
         }
 
-        private void AddItem(ListBox list, ComboBox combo)
-        {
-            if (combo.SelectedItem is string display)
-            {
-                var rev = DisplayNames.ToDictionary(kv => kv.Value, kv => kv.Key);
-                if (rev.TryGetValue(display, out string type))
-                {
-                    var item = new LineItem { Type = type };
-                    item.Label = type == "Text" ? "Text" : GetFormatHint(type, false, false);
-                    string typeNorm = type?.ToLower().Replace(" ", "").Replace("_", "") ?? "";
-                    if (typeNorm == "weather" || typeNorm == "nowplaying")
-                        item.DurationMs = 5000;
-                    list.Items.Add(item);
-                    list.SelectedIndex = list.Items.Count - 1;
-                }
-            }
-        }
-
-        private void RemoveItem(ListBox list)
-        {
-            if (list.SelectedIndex >= 0) list.Items.RemoveAt(list.SelectedIndex);
-        }
-
-        private void MoveItem(ListBox list, int dir)
-        {
-            int i = list.SelectedIndex;
-            if (i < 0) return;
-            int j = i + dir;
-            if (j < 0 || j >= list.Items.Count) return;
-            var item = list.Items[i];
-            list.Items.RemoveAt(i);
-            list.Items.Insert(j, item);
-            list.SelectedIndex = j;
-        }
-
         // ----------------------------------------------------------------
         //  Load settings into controls
         // ----------------------------------------------------------------
@@ -2805,13 +2945,9 @@ namespace GGSystemMonitor
         {
             _loading = true;
 
-            AppSettings s = null;
-            if (File.Exists(_settingsPath))
-            {
-                try { s = System.Text.Json.JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(_settingsPath)); }
-                catch { }
-            }
-            s = s ?? new AppSettings();
+            AppSettings s;
+            try { s = SettingsManager.LoadFrom(_settingsPath); }
+            catch { s = new AppSettings(); }
 
             // Load sensor lists from hardware.json
             try
@@ -2826,10 +2962,18 @@ namespace GGSystemMonitor
             }
             catch { }
 
-            // Display
-            PopulateList(_topList,    s.TopLineItems    ?? new List<LineItem> { new LineItem { Type = "CpuTemperature" } });
-            PopulateList(_bottomList, s.BottomLineItems ?? new List<LineItem> { new LineItem { Type = "GpuTemperature" } });
-            _rotationNud.Value = Clamp(_rotationNud, s.RotationIntervalMs);
+            _displayPresets = (s.DisplayPresets ?? new List<DisplayPreset>())
+                .Where(p => p?.Layout != null && !string.IsNullOrWhiteSpace(p.Id) &&
+                    p.Id != DisplayPreset.DefaultId && !string.IsNullOrWhiteSpace(p.Name))
+                .GroupBy(p => p.Id).Select(group => group.First()).ToList();
+            string selectedPreset = s.ActiveDisplayPresetId;
+            if (selectedPreset != DisplayPreset.DefaultId && FindPreset(selectedPreset) == null)
+            {
+                var recovered = new DisplayPreset { Id = Guid.NewGuid().ToString("N"), Name = NextCustomPresetName(), Layout = DisplayLayout.From(s) };
+                _displayPresets.Add(recovered);
+                selectedPreset = recovered.Id;
+            }
+            UseDisplayPreset(selectedPreset);
 
             if (_outputProfile != null) _outputProfile.SelectedIndex = s.OutputProfile == "arctis" ? 1 : s.OutputProfile == "gamedac" ? 2 : 0;
             // General
@@ -2859,6 +3003,7 @@ namespace GGSystemMonitor
                 }
             }
 
+            WidgetFontDefaultChanged?.Invoke();
             _loading = false;
             _baseline = CaptureBaseline();
             ResetDirty();
@@ -2874,7 +3019,8 @@ namespace GGSystemMonitor
             _capsLockCheck.CheckedChanged     += (s, e) => EvaluateDirty();
             _showUpdateCheck.CheckedChanged   += (s, e) => EvaluateDirty();
             _ggPathBox.TextChanged            += (s, e) => EvaluateDirty();
-            _oledFontCombo.SelectedIndexChanged += (s, e) => EvaluateDirty();
+            _rotateTogether.CheckedChanged += (s, e) => EvaluateDirty();
+            _oledFontCombo.SelectedIndexChanged += (s, e) => { EvaluateDirty(); WidgetFontDefaultChanged?.Invoke(); };
             // Commit typed value immediately so HasChanges() reads the updated Value
             foreach (var nud in new[] { _rotationNud, _cpuWarnNud, _cpuCritNud, _gpuWarnNud, _gpuCritNud, _tempUpdateNud, _gpuTempUpdateNud, _gpuPasteGapNud })
                 WireNudCommit(nud);
@@ -2909,11 +3055,7 @@ namespace GGSystemMonitor
         {
             list.Items.Clear();
             foreach (var item in items)
-            {
-                if (item.Label == null && !string.Equals(item.Type, "Text", StringComparison.OrdinalIgnoreCase))
-                    item.Label = GetFormatHint(item.Type, item.UseFahrenheit, item.UseRamMb);
-                list.Items.Add(item);
-            }
+                if (item != null) list.Items.Add(item);
         }
 
         private static bool ParseIsAuto(string setting) =>
@@ -2991,39 +3133,14 @@ namespace GGSystemMonitor
             try { jo = File.Exists(_settingsPath) ? JObject.Parse(File.ReadAllText(_settingsPath)) : new JObject(); }
             catch  { jo = new JObject(); }
 
-            JArray MapList(ListBox lb) => new JArray(
-                lb.Items.Cast<LineItem>().Select(item => new JObject(
-                    new JProperty("Type",                   item.Type),
-                    new JProperty("Label",                  item.Label),
-                    new JProperty("DurationMs",             item.DurationMs),
-                    new JProperty("UseFahrenheit",          item.UseFahrenheit),
-                    new JProperty("UseRamMb",               item.UseRamMb),
-                    new JProperty("NotPlayingText",         item.NotPlayingText),
-                    new JProperty("SkipIfNotPlaying",       item.SkipIfNotPlaying),
-                    new JProperty("NowPlayingSpotify",      item.NowPlayingSpotify),
-                    new JProperty("NowPlayingYouTube",      item.NowPlayingYouTube),
-                    new JProperty("NowPlayingOtherPlayer",  item.NowPlayingOtherPlayer),
-                    new JProperty("PollIntervalMs",         item.PollIntervalMs),
-                    new JProperty("EnableWarnIndicators",   item.EnableWarnIndicators),
-                    new JProperty("WarnTemp",               item.WarnTemp),
-                    new JProperty("CritTemp",               item.CritTemp),
-                    new JProperty("SensorOverride",         item.SensorOverride),
-                    new JProperty("HardwareId", item.HardwareId),
-                    new JProperty("GpuPasteMonitoring",     item.GpuPasteMonitoring),
-                    new JProperty("GpuPasteGapTemp",        item.GpuPasteGapTemp),
-                    new JProperty("WeatherLocation",        item.WeatherLocation)
-                ))
-            );
-
             jo["OutputProfile"] = _outputProfile?.SelectedIndex == 1 ? "arctis" : _outputProfile?.SelectedIndex == 2 ? "gamedac" : "keyboard";
             jo["GGEngineCorePropsPath"]   = _ggPathBox.Text;
             jo["ShowCapsLockIndicator"]   = _capsLockCheck.Checked;
             jo["ShowUpdateNotifications"] = _showUpdateCheck.Checked;
             jo.Remove("DebugCpuTemperatureOverride");
             jo.Remove("_note_DebugCpuTemperatureOverride");
-            jo["TopLineItems"]            = MapList(_topList);
-            jo["BottomLineItems"]         = MapList(_bottomList);
-            jo["RotationIntervalMs"]      = (int)_rotationNud.Value;
+            StashDisplayPreset(forkDefault: true);
+            WriteDisplaySettings(jo);
             string chosenFont = _oledFontCombo.SelectedIndex == 0 ? "" : _oledFontCombo.SelectedItem?.ToString() ?? "";
             if (!string.IsNullOrEmpty(chosenFont))
             {
@@ -3038,7 +3155,7 @@ namespace GGSystemMonitor
             }
             jo["OledFont"]                = chosenFont;
 
-            File.WriteAllText(_settingsPath, jo.ToString(Formatting.Indented));
+            SettingsManager.WriteFile(_settingsPath, jo.ToString(Formatting.Indented));
 
             LoadAndPopulate();
 
@@ -3049,7 +3166,7 @@ namespace GGSystemMonitor
         private void OnResetDefaultsClick(object sender, EventArgs e)
         {
             var confirm = MessageBox.Show(
-                "This will reset all settings to their default values.\n\nAre you sure?",
+                "This switches Display to (default) and resets General settings. Your custom presets will be kept.\n\nAre you sure?",
                 "Reset Settings",
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Warning,
@@ -3059,19 +3176,7 @@ namespace GGSystemMonitor
 
             var d = new AppSettings();
             _loading = true;
-            var defaultTopItems = new List<LineItem>
-            {
-                new LineItem { Type = "CpuTemperature", Label = GetFormatHint("CpuTemperature", false, false) },
-                new LineItem { Type = "CpuUsage",       Label = GetFormatHint("CpuUsage",       false, false) },
-                new LineItem { Type = "RamUsage",       Label = GetFormatHint("RamUsage",       false, false) },
-            };
-            var defaultBottomItems = new List<LineItem>
-            {
-                new LineItem { Type = "GpuTemperature", Label = GetFormatHint("GpuTemperature", false, false) },
-            };
-            PopulateList(_topList,    defaultTopItems);
-            PopulateList(_bottomList, defaultBottomItems);
-            _rotationNud.Value           = Clamp(_rotationNud, d.RotationIntervalMs);
+            UseDisplayPreset(DisplayPreset.DefaultId);
             _capsLockCheck.Checked       = d.ShowCapsLockIndicator;
             _showUpdateCheck.Checked     = d.ShowUpdateNotifications;
             _ggPathBox.Text              = d.GGEngineCorePropsPath;
@@ -3142,6 +3247,7 @@ namespace GGSystemMonitor
             if (cpuSel != null) PopulateCpuExtPanel(cpuSel);
             var gpuSel = GetSelectedGpuItem();
             if (gpuSel != null) PopulateGpuExtPanel(gpuSel);
+            WidgetThresholdContextChanged?.Invoke();
             EvaluateDirty();
         }
 
@@ -3421,15 +3527,31 @@ namespace GGSystemMonitor
         private sealed class ScrollWheelFilter : IMessageFilter
         {
             private const int WM_MOUSEWHEEL = 0x020A;
+            [System.Runtime.InteropServices.DllImport("user32.dll")]
+            private static extern IntPtr WindowFromPoint(Point point);
+            [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "SendMessageW")]
+            private static extern IntPtr SendWheel(IntPtr window, int message, IntPtr wParam, IntPtr lParam);
             private readonly Control    _target;
             private readonly Action<int> _onDelta;
             public ScrollWheelFilter(Control target, Action<int> onDelta) { _target = target; _onDelta = onDelta; }
             public bool PreFilterMessage(ref Message m)
             {
-                if (m.Msg != WM_MOUSEWHEEL) return false;
-                var pt = _target.PointToClient(Cursor.Position);
-                if (!_target.ClientRectangle.Contains(pt)) return false;
-                int delta = unchecked((short)((long)m.WParam >> 16));
+                if (m.Msg != WM_MOUSEWHEEL || !_target.Visible) return false;
+                long coordinates = m.LParam.ToInt64();
+                var point = new Point(unchecked((short)coordinates), unchecked((short)(coordinates >> 16)));
+                if (!_target.ClientRectangle.Contains(_target.PointToClient(point))) return false;
+
+                Control hovered = Control.FromChildHandle(WindowFromPoint(point));
+                if (hovered != _target && (hovered == null || !_target.Contains(hovered))) return false;
+                for (var control = hovered; control != _target; control = control.Parent)
+                {
+                    if (!(control is ListBox list)) continue;
+                    if (m.HWnd == list.Handle) return false; // The native list already has the message.
+                    SendWheel(list.Handle, m.Msg, m.WParam, m.LParam);
+                    return true;
+                }
+
+                int delta = unchecked((short)(m.WParam.ToInt64() >> 16));
                 _onDelta(delta);
                 return true;
             }

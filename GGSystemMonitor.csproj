@@ -47,6 +47,15 @@
     <Compile Include="SettingsForm.cs" />
     <Compile Include="HardwareRuntime.cs" />
     <Compile Include="SettingsExtras.cs" />
+    <Compile Include="DisplayRotation.cs" />
+    <Compile Include="WidgetEditor.cs" />
+    <Compile Include="WidgetListMenus.cs" />
+    <Compile Include="PriorityOrderDialog.cs" />
+    <Compile Include="DisplayPresets.cs" />
+    <Compile Include="GpuThermalAlerts.cs" />
+    <Compile Include="NativeOledPixelFont.cs" />
+    <Compile Include="NativeOledRendering.cs" />
+    <EmbeddedResource Include="Assets\OledNativeGlyphs.hex" LogicalName="GGSystemMonitor.OledNativeGlyphs.hex" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <None Update="GGSystemMonitor_icon.ico" CopyToOutputDirectory="PreserveNewest" />
     <None Update="Install.ps1" CopyToOutputDirectory="PreserveNewest" />

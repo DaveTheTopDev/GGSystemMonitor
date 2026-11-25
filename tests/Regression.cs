@@ -11,7 +11,7 @@ using LibreHardwareMonitor.Hardware;
 using Moq;
 using Newtonsoft.Json.Linq;
 
-internal static class Regression
+internal static partial class Regression
 {
     static Type P = typeof(Computer).Assembly == null ? null : Assembly.Load("GGSystemMonitor").GetType("GGSystemMonitor.Program");
     static BindingFlags Flags = BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public;
@@ -61,6 +61,7 @@ internal static class Regression
                 Check(!(bool)Call("IsValidTemperature", value), "reject invalid temperature " + value);
             Check((bool)Call("IsValidTemperature", (double?)42.5), "accept valid temperature");
             Check((string)Call("NormalizeCpuName", "13th Gen Intel Core i9-13900K") == "Intel Core i9-13900K", "CPU model normalization");
+            CheckNewTemperatureLimits();
             var cpu = Hardware("CPU", "cpu", HardwareType.Cpu, Sensor("CPU Average", "bad", 0), Sensor("CPU Package", "package", 52), Sensor("Core #1", "core", 44));
             Check((double?)Call("ReadTemperature", cpu, null) == 52, "Auto skips zero sensor");
             Check((double?)Call("ReadTemperature", cpu, "/core") == 44, "sensor identifier selection");
@@ -81,6 +82,12 @@ internal static class Regression
                 }
             var settingsType = P.GetNestedType("AppSettings", BindingFlags.Public);
             var settings = Activator.CreateInstance(settingsType); P.GetField("settings", Flags).SetValue(null, settings);
+            CheckDisplayRules();
+            CheckHiddenWidgetRotation();
+            CheckRamPriorityAndGpuAlerts();
+            CheckIndependentPriorityPeer();
+            CheckWeatherVisibility();
+            CheckPresetStorage();
             foreach (var profile in new[] { new { Name = "keyboard", Height = 40 }, new { Name = "arctis", Height = 48 }, new { Name = "gamedac", Height = 52 } })
             {
                 settingsType.GetProperty("OutputProfile").SetValue(settings, profile.Name);
@@ -91,7 +98,18 @@ internal static class Regression
                 var handler = binding["handlers"][0];
                 Check((string)handler["mode"] == "screen" && (string)handler["zone"] == "one", "binding is screen-only " + profile.Name);
                 Check((string)handler["device-type"] == (profile.Name == "keyboard" ? "keyboard" : "screened-128x" + profile.Height), "binding selects output profile " + profile.Name);
+                P.GetField("_bitmapFrame", Flags).SetValue(null, true);
+                var imageBinding = CaptureRequest(() => Call("BindEvent"))["handlers"][0];
+                Check((string)imageBinding["device-type"] == "screened-128x" + profile.Height &&
+                    (bool)imageBinding["datas"][0]["has-text"] == false &&
+                    ((JArray)imageBinding["datas"][0]["image-data"]).Count == 128 * profile.Height / 8,
+                    "mixed fonts bind a correctly sized bitmap on " + profile.Name);
+                P.GetField("_bitmapFrame", Flags).SetValue(null, false);
             }
+            CheckStableMixedFontBinding();
+            CheckNativePixelFont();
+            CheckNativeIndicators();
+            CheckInlineWidgetIcons();
             var formType = P.Assembly.GetType("GGSystemMonitor.SettingsForm");
             using (var form = (Form)Activator.CreateInstance(formType, true))
             {
@@ -124,10 +142,14 @@ internal static class Regression
                 Check((string)saved["_note_regression"] == "keep this", "save preserves note fields");
                 Check((string)saved["TopLineItems"][0]["HardwareId"] == "/retained-device", "save preserves explicit device identifier");
                 Check((string)saved["TopLineItems"][0]["SensorOverride"] == "/retained-sensor", "save preserves explicit sensor identifier");
+                CheckWidgetEditor(form, formType, fields, top, settingsPath, args.Contains("--ui-captures"));
                 var profiles = (ComboBox)formType.GetField("_outputProfile", fields).GetValue(form);
                 profiles.SelectedIndex = 1;
                 formType.GetMethod("SaveSettings", fields).Invoke(form, null);
                 Check((string)JObject.Parse(File.ReadAllText(settingsPath))["OutputProfile"] == "arctis", "save preserves experimental output profile");
+                CheckPresetEditor(form, formType, fields, top, settingsPath, args.Contains("--ui-captures"));
+                CheckWidgetListMenus(form, formType, fields, top, settingsPath, args.Contains("--ui-captures"));
+                CheckWidgetWheelRouting(form, formType);
                 // Restore a deterministic fixture for subsequent runs.
                 original.Remove("_note_regression");
                 File.WriteAllText(settingsPath, original.ToString());
@@ -141,9 +163,9 @@ internal static class Regression
                 {
                     using (var proc = System.Diagnostics.Process.GetCurrentProcess())
                     {
-                        for (int i = 0; i < 100; i++) Call("SendToOledImage", "CPU: 54.2 C", "Test pattern");
+                        for (int i = 0; i < 100; i++) RenderBitmapForTest("♫ Song " + i, "☀ Weather", font, font, "", "");
                         proc.Refresh(); long before = proc.PrivateMemorySize64;
-                        for (int i = 0; i < 2000; i++) Call("SendToOledImage", "CPU: 54.2 C", "Test pattern");
+                        for (int i = 0; i < 2000; i++) RenderBitmapForTest("♫ Song " + (i % 20), "☀ Weather", font, font, "", "");
                         proc.Refresh(); long growth = proc.PrivateMemorySize64 - before;
                         Console.WriteLine("STRESS private bytes growth = " + growth);
                         Check(growth < 64 * 1024 * 1024, "2000-frame image allocation budget");

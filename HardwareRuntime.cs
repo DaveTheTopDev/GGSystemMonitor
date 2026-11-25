@@ -55,14 +55,18 @@ namespace GGSystemMonitor
             _reloadSettings = false;
             try
             {
-                var loaded = SettingsManager.LoadSettings();
-                settings = loaded;
-                UpdateOledFont();
-                RefreshWidgetFlags();
-                if (baseUrl != null) { RegisterEvent(); BindEvent(); }
+                ApplyDisplaySettings(SettingsManager.LoadSettings());
                 _weatherRefreshMs = 0;
             }
             catch { _reloadSettings = true; }
+        }
+        private static void ApplyDisplaySettings(AppSettings loaded)
+        {
+            string previousDevice = ScreenBindingDevice();
+            settings = loaded;
+            UpdateOledFont();
+            RefreshWidgetFlags();
+            if (previousDevice != ScreenBindingDevice()) InvalidateScreenBinding();
         }
         private static void CheckTestPattern()
         {
@@ -95,7 +99,37 @@ namespace GGSystemMonitor
         }
         private static int GetProcessId() { using (var p = Process.GetCurrentProcess()) return p.Id; }
         internal static bool IsValidTemperature(double? value) => value.HasValue && !double.IsNaN(value.Value) && !double.IsInfinity(value.Value) && value.Value > 0 && value.Value < 200;
-        internal static string NormalizeCpuName(string name) => Regex.Replace(name ?? "", @"^\d+(?:st|nd|rd|th) Gen\s+", "", RegexOptions.IgnoreCase).Replace("(R)", "").Replace("(TM)", "").Trim();
+        private static readonly Regex HardwareNameNoise = new Regex(@"\((?:R|TM)\)|[®™]", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex HardwareNameSpacing = new Regex(@"\s+", RegexOptions.Compiled);
+        private static readonly Regex CpuBrandPrefix = new Regex(@"^\d+(?:st|nd|rd|th) Gen\s+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex CpuBrandSuffix = new Regex(
+            @"\s*(?:@[^@]*|\s+\d+-Core Processor\b.*|\s+(?:w/|with)\s+(?:AMD\s+)?Radeon\b.*)$",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex CpuMarketingWords = new Regex(@"\s+(?:Processor\b|Dual Edition$)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex Gpu5060TiVramSuffix = new Regex(@"^NVIDIA GeForce RTX 5060 Ti\s+(?:8|16)\s*GB$",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex GpuVramSpacing = new Regex(@"(?<=\d)\s+GB$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private static string NormalizeHardwareName(string name) =>
+            HardwareNameSpacing.Replace(HardwareNameNoise.Replace(name ?? "", ""), " ").Trim();
+
+        internal static string NormalizeCpuName(string name)
+        {
+            string model = CpuBrandPrefix.Replace(NormalizeHardwareName(name), "");
+            model = CpuBrandSuffix.Replace(model, "");
+            return CpuMarketingWords.Replace(model, "").Trim();
+        }
+
+        private static string NormalizeGpuName(string name)
+        {
+            string model = NormalizeHardwareName(name);
+            if (model.StartsWith("GeForce ", StringComparison.OrdinalIgnoreCase))
+                model = "NVIDIA " + model;
+            if (model.StartsWith("Radeon RX ", StringComparison.OrdinalIgnoreCase))
+                model = "AMD " + model;
+            // NVIDIA publishes one limit for both VRAM variants of the desktop 5060 Ti.
+            return Gpu5060TiVramSuffix.IsMatch(model) ? "NVIDIA GeForce RTX 5060 Ti" : GpuVramSpacing.Replace(model, "GB");
+        }
         private static IEnumerable<IHardware> WalkHardware(IEnumerable<IHardware> roots)
         {
             foreach (var hw in roots) { yield return hw; foreach (var child in WalkHardware(hw.SubHardware)) yield return child; }
@@ -136,12 +170,6 @@ namespace GGSystemMonitor
         {
             var values = Sensors(hw).Where(s => s.SensorType == SensorType.Load && s.Value.HasValue && !float.IsNaN(s.Value.Value) && !float.IsInfinity(s.Value.Value));
             return (values.FirstOrDefault(s => s.Name.IndexOf("core", StringComparison.OrdinalIgnoreCase) >= 0) ?? values.FirstOrDefault())?.Value;
-        }
-        private static void SelectWidgetHardware(LineItem item)
-        {
-            if (item == null || _computer == null) return;
-            if (IsLineItemType(item, "cputemperature")) { cpuHardware = ResolveHardware(item, true); cachedCpuTemp = ReadTemperature(cpuHardware, item.SensorOverride); }
-            if (IsLineItemType(item, "gputemperature") || IsLineItemType(item, "gpuusage")) { gpuHardware = ResolveHardware(item, false); cachedGpuTemp = ReadTemperature(gpuHardware, item.SensorOverride); cachedGpuUsage = ReadLoad(gpuHardware); }
         }
         private static string CpuStatus() => IsValidTemperature(cachedCpuTemp) ? "Available" : !new System.Security.Principal.WindowsPrincipal(System.Security.Principal.WindowsIdentity.GetCurrent()).IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator) ? "InsufficientPrivileges" : string.IsNullOrEmpty(_sensorError) ? "SensorUnavailable" : "ReadFailed";
         private static void WriteHardwareInventory()

@@ -28,15 +28,15 @@ namespace GGSystemMonitor
         private const int DEFAULT_SCREEN_COLS = 15;
         private const int OLED_IMAGE_WIDTH = 128;
         private static int OLED_IMAGE_HEIGHT => settings?.OutputProfile == "arctis" ? 48 : settings?.OutputProfile == "gamedac" ? 52 : 40;
-        private const int OLED_IMAGE_INDICATOR_COL_WIDTH = 9;
         private const string DEFAULT_CAPS_LOCK_INDICATOR = "🡅";
-        private const string CUSTOM_FONT_CAPS_LOCK_INDICATOR = "↑";
+        private const string TEMPERATURE_WARNING_INDICATOR = "⚠";
+        private const string TEMPERATURE_CRITICAL_INDICATOR = "🔥";
         private const string OLED_WIDE_TEXT_GLYPHS = "▶⏸♫♪⏰📅";
         private const int OLED_FONT_MEASURE_CACHE_LIMIT = 512;
-        private static int SCREEN_COLS = 15;
+        private const int SCREEN_COLS = DEFAULT_SCREEN_COLS;
         private const int OLED_UPDATE_INTERVAL_MS = 250;
         private const string EVENT_NAME = "SYS_MONITOR";
-        internal const string VERSION = "3.2.1";
+        internal const string VERSION = "3.3.0";
         private const string GITHUB_REPO = "DaveTheTopDev/GGSystemMonitor";
         private static HttpClient http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
         private static readonly HttpClient GgHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
@@ -44,8 +44,8 @@ namespace GGSystemMonitor
             Path.Combine(AppContext.BaseDirectory, "monitor_status.json");
         private static int[] OledBlankImageData => new int[OLED_IMAGE_WIDTH * OLED_IMAGE_HEIGHT / 8];
         private static readonly object OledFontMeasureLock = new object();
-        private static readonly Dictionary<string, int> OledFontWidthCache = new Dictionary<string, int>();
-        private static readonly Dictionary<string, float> OledFontAdvanceCache = new Dictionary<string, float>();
+        private static readonly Dictionary<(Font, string, bool, bool), float> OledFontAdvanceCache =
+            new Dictionary<(Font, string, bool, bool), float>();
         private static Computer _computer;
         private static IHardware cpuHardware;
         private static IHardware gpuHardware;
@@ -55,11 +55,6 @@ namespace GGSystemMonitor
         private static int updateValue;
         private static int screenUpdate;
         private static int _blinkPhase;
-        internal static bool gpuPasteWarning;
-        private static int gpuPasteFPCounter;
-        private static int textScrollPos;
-        private static int _topLineDuration;
-        private static int _bottomLineDuration;
         private static bool capsLockToggled;
         internal static volatile string AvailableVersion = null;
         private  static int _updateNotifCycle = 0;
@@ -93,13 +88,18 @@ namespace GGSystemMonitor
         private static int       _nowPlayingPollInProgress = 0;
         private static int       _memoryMaintenanceMs = 60 * 1000;
         private static Font      _oledFont            = null;
+        private static Font _nativeBitmapFont;
+        private static readonly Dictionary<(string, int), Font> FrameFonts = new Dictionary<(string, int), Font>();
+        private static bool _bitmapFrame;
+        private static bool _bindingReady;
+        private static long _nextBindAttempt;
+        private static OledFrameBuffer _oledFrameBuffer;
         private static bool    _smtcLoggedError    = false;
         private static bool    _weatherLoggedError = false;
         private static DateTime _nowPlayingPositionTime = DateTime.MinValue;
         private static string  _nowPlayingSongKey   = null;
         private static volatile bool _hasWeatherWidget;
         private static volatile bool _hasNowPlayingWidget;
-        private const string PasteWarningText = "                 Check GPU Thermal Paste!";
 
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         private static extern short GetKeyState(int nVirtKey);
@@ -109,18 +109,11 @@ namespace GGSystemMonitor
 
         private static volatile AppSettings settings;
         private static readonly Regex coreSensorRegex = new Regex(@"core #\d+", RegexOptions.Compiled);
-        private static double? cachedHotspot;
         private static double? cachedCpuTemp;
-        private static double? cachedGpuTemp;
         private static double? cachedCpuUsage;
-        private static double? cachedGpuUsage;
         private static double? cachedRamUsed;
         private static double? cachedRamTotal;
         private static IHardware memoryHardware;
-        private static int topLineIndex;
-        private static int bottomLineIndex;
-        private static int topLineTimer;
-        private static int bottomLineTimer;
         [System.STAThread]
         static void Main(string[] args)
         {
@@ -231,8 +224,14 @@ namespace GGSystemMonitor
                 RegisterApp();
                 RegisterEvent();
                 BindEvent();
-                if (_oledFont != null) SendToOledImage("GGSystemMonitor", "Waiting...");
-                else                   SendToOled("GGSystemMonitor", "Waiting...");
+                if (_bindingReady)
+                {
+                    if (_bitmapFrame)
+                    {
+                        SendToOledImage("GGSystemMonitor", "Waiting...", _oledFont, _oledFont, "", "");
+                    }
+                    else SendToOled("GGSystemMonitor", "Waiting...");
+                }
                 StartCapsLockWatcher();
 
                 // Check GitHub for a newer release only when OLED update notifications are enabled.
@@ -271,6 +270,7 @@ namespace GGSystemMonitor
                             try { cachedCpuUsage = GetCpuUsage(); } catch { cachedCpuUsage = null; }
                             try { (cachedRamUsed, cachedRamTotal) = GetRamUsage(); }
                             catch { cachedRamUsed = null; cachedRamTotal = null; }
+                            WidgetReadings.Clear();
                             WriteMonitorStatus();
                         }
 
@@ -280,32 +280,9 @@ namespace GGSystemMonitor
                             int gpuInterval = GetMinPollInterval("gputemperature");
                             _gpuPollMs = gpuInterval;
                             PollHardware();
-                            cachedGpuTemp = ReadTemperature(gpuHardware, null);
-                            cachedGpuUsage = ReadLoad(gpuHardware);
+                            WidgetReadings.Clear();
 
-                            // GPU thermal paste monitoring — use the currently-displayed GPU temp item's settings
-                            bool pasteWarnFromHW = false;
-                            var activeGpuItem = GetActiveGpuItem();
-                            if (activeGpuItem != null && activeGpuItem.GpuPasteMonitoring)
-                            {
-                                SelectWidgetHardware(activeGpuItem);
-                                cachedHotspot = GetGpuHotSpot();
-                                if (cachedHotspot.HasValue && cachedGpuTemp.HasValue &&
-                                    cachedHotspot - cachedGpuTemp > activeGpuItem.GpuPasteGapTemp)
-                                {
-                                    if (gpuPasteFPCounter < 48) gpuPasteFPCounter++;
-                                }
-                                else if (gpuPasteFPCounter > 0)
-                                {
-                                    gpuPasteFPCounter--;
-                                }
-                                pasteWarnFromHW = gpuPasteFPCounter >= 12;
-                            }
-                            else
-                            {
-                                gpuPasteFPCounter = 0;
-                            }
-                            gpuPasteWarning = pasteWarnFromHW;
+                            PollThermalAlerts(settings, RotationClock.ElapsedMilliseconds);
                         }
 
                         // Weather refresh (every 15 minutes; only when a weather widget is configured)
@@ -340,37 +317,6 @@ namespace GGSystemMonitor
                         {
                             _nowPlayingPollMs = 1000;
                             ClearNowPlaying();
-                        }
-
-                        topLineTimer -= tickMs;
-                        if (topLineTimer <= 0)
-                        {
-                            var topItems = settings.TopLineItems;
-                            if (topItems != null && topItems.Count > 1)
-                            {
-                                topLineIndex = (topLineIndex + 1) % topItems.Count;
-                                for (int _skip = 0; _skip < topItems.Count - 1 && ShouldSkipItem(topItems[topLineIndex]); _skip++)
-                                    topLineIndex = (topLineIndex + 1) % topItems.Count;
-                            }
-                            var cur = topItems != null && topItems.Count > 0 ? topItems[topLineIndex % topItems.Count] : null;
-                            int topDur = (cur?.DurationMs > 0) ? cur.DurationMs : (settings.RotationIntervalMs > 0 ? settings.RotationIntervalMs : 3000);
-                            topLineTimer = topDur;
-                            _topLineDuration = topDur;
-                        }
-                        bottomLineTimer -= tickMs;
-                        if (bottomLineTimer <= 0)
-                        {
-                            var bottomItems = settings.BottomLineItems;
-                            if (bottomItems != null && bottomItems.Count > 1)
-                            {
-                                bottomLineIndex = (bottomLineIndex + 1) % bottomItems.Count;
-                                for (int _skip = 0; _skip < bottomItems.Count - 1 && ShouldSkipItem(bottomItems[bottomLineIndex]); _skip++)
-                                    bottomLineIndex = (bottomLineIndex + 1) % bottomItems.Count;
-                            }
-                            var cur = bottomItems != null && bottomItems.Count > 0 ? bottomItems[bottomLineIndex % bottomItems.Count] : null;
-                            int botDur = (cur?.DurationMs > 0) ? cur.DurationMs : (settings.RotationIntervalMs > 0 ? settings.RotationIntervalMs : 3000);
-                            bottomLineTimer = botDur;
-                            _bottomLineDuration = botDur;
                         }
 
                         if (AvailableVersion != null && settings.ShowUpdateNotifications)
@@ -409,21 +355,12 @@ namespace GGSystemMonitor
                         screenUpdate -= tickMs;
                         if (screenUpdate <= 0)
                         {
+                            long now = RotationClock.ElapsedMilliseconds;
+                            _frameMedia = _mediaActivity;
+                            Rotation.Update(settings, now, LiveRules, _frameMedia?.Key);
                             _blinkPhase = (_blinkPhase + 1) & 3;
-                            // Advance paste-warning scroll only in the main loop so caps-lock
-                            // key presses (which also send a frame) don't speed it up
-                            if (gpuPasteWarning)
-                            {
-                                textScrollPos++;
-                                if (textScrollPos >= PasteWarningText.Length + 32)
-                                    textScrollPos = 0;
-                            }
-                            else
-                            {
-                                textScrollPos = 0;
-                            }
                             if (_ggConnected)
-                                BuildAndSendDisplay();
+                                BuildAndSendDisplay(now);
                             screenUpdate = OLED_UPDATE_INTERVAL_MS;
                         }
 
@@ -450,13 +387,14 @@ namespace GGSystemMonitor
             {
                 try { PostJsonText("/stop_game", "{\"game\":\"" + APP_NAME + "\"}"); } catch { }
                 try { _computer?.Close(); } catch { }
+                ReleaseFrameFonts();
                 _monitorMutex?.Dispose();
                 _stopSignal?.Dispose();
             }
         }
         public class AppSettings
         {
-            public const int CurrentSettingsVersion = 2;
+            public const int CurrentSettingsVersion = 3;
             public int SettingsVersion { get; set; } = 0;
             public string GGEngineCorePropsPath { get; set; } = @"C:/ProgramData/SteelSeries/SteelSeries Engine 3/coreProps.json";
             public bool ShowCapsLockIndicator { get; set; } = true;
@@ -464,37 +402,70 @@ namespace GGSystemMonitor
             [System.Text.Json.Serialization.JsonConverter(typeof(LineItemListConverter))]
             public List<LineItem> TopLineItems { get; set; } = new List<LineItem>
             {
-                new LineItem { Type = "CpuTemperature" },
-                new LineItem { Type = "CpuUsage" },
-                new LineItem { Type = "RamUsage" },
+                DefaultTemperatureWidget("CpuTemperature", "CPU: {temp:F1}°C"),
+                new LineItem { Type = "CpuUsage", Label = "CPU USE: {pct:F0}%", VisibilityThreshold = 70 },
+                new LineItem { Type = "RamUsage", Label = "RAM: {used:0.#}/{total:0.#}GB", VisibilityThreshold = 70 },
             };
             [System.Text.Json.Serialization.JsonConverter(typeof(LineItemListConverter))]
-            public List<LineItem> BottomLineItems { get; set; } = new List<LineItem> { new LineItem { Type = "GpuTemperature" } };
+            public List<LineItem> BottomLineItems { get; set; } = new List<LineItem>
+            {
+                DefaultTemperatureWidget("GpuTemperature", "GPU: {temp:F1}°C"),
+                new LineItem { Type = "GpuUsage", Label = "GPU USE: {pct:F0}%", VisibilityThreshold = 75 },
+            };
             public int RotationIntervalMs { get; set; } = 3000;
+            public bool RotateLinesTogether { get; set; } = true;
+            public string ActiveDisplayPresetId { get; set; } = DisplayPreset.DefaultId;
+            public List<DisplayPreset> DisplayPresets { get; set; } = new List<DisplayPreset>();
             public string OledFont        { get; set; } = "";
             public string OutputProfile { get; set; } = "keyboard";
+
+            private static LineItem DefaultTemperatureWidget(string type, string label) => new LineItem
+            {
+                Type = type,
+                Label = label,
+                PriorityMode = (int)WidgetPriority.Threshold,
+                // Follow this widget's hardware-derived warning value, not the
+                // value displayed on the PC where the default was authored.
+                WarnTemp = "AUTO",
+                CritTemp = "AUTO",
+                PriorityThreshold = null
+            };
         }
         public static class SettingsManager
         {
             private static readonly string SettingsFilePath =
                 Path.Combine(AppContext.BaseDirectory, "settings.json");
 
-            public static AppSettings LoadSettings()
+            public static AppSettings LoadSettings() => LoadFrom(SettingsFilePath);
+
+            internal static AppSettings LoadFrom(string path)
             {
-                if (!File.Exists(SettingsFilePath))
-                {
-                    File.WriteAllText(SettingsFilePath, GetDefaultSettingsJson());
-                }
-                string fileJson = File.ReadAllText(SettingsFilePath);
+                if (!File.Exists(path)) WriteFile(path, GetDefaultSettingsJson());
+                string fileJson = File.ReadAllText(path);
                 AppSettings appSettings = JsonSerializer.Deserialize<AppSettings>(fileJson) ?? new AppSettings();
                 if (appSettings.SettingsVersion < AppSettings.CurrentSettingsVersion)
-                    appSettings = Migrate(appSettings, fileJson);
+                    Migrate(appSettings, fileJson, path);
+                DisplayPreset.Resolve(appSettings).Project(appSettings);
                 return appSettings;
+            }
+
+            internal static void WriteFile(string path, string json)
+            {
+                // Publish a complete JSON document so the background monitor's
+                // settings watcher never sees a partially written preset.
+                string temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                try
+                {
+                    File.WriteAllText(temporary, json);
+                    if (File.Exists(path)) File.Replace(temporary, path, null);
+                    else File.Move(temporary, path);
+                }
+                finally { if (File.Exists(temporary)) File.Delete(temporary); }
             }
             private static string GetDefaultSettingsJson()
             {
-                return @"{
-  ""SettingsVersion"": 1,
+                var document = JObject.Parse(@"{
+  ""DisplayPresets"": [],
 
   ""GGEngineCorePropsPath"": ""C:/ProgramData/SteelSeries/SteelSeries Engine 3/coreProps.json"",
   ""_note_GGEngineCorePropsPath"": ""Only change if GG Engine is installed in a non-default location."",
@@ -505,40 +476,34 @@ namespace GGSystemMonitor
   ""ShowUpdateNotifications"": true,
   ""_note_ShowUpdateNotifications"": ""When a newer version is found, display a notification on the keyboard OLED (Update / Available) for 3 seconds every 10 seconds."",
 
-  ""TopLineItems"": [ { ""Type"": ""CpuTemperature"", ""Label"": null, ""DurationMs"": 0, ""PollIntervalMs"": 2000, ""EnableWarnIndicators"": true, ""WarnTemp"": ""AUTO"", ""CritTemp"": ""AUTO"" }, { ""Type"": ""CpuUsage"", ""Label"": null, ""DurationMs"": 0 }, { ""Type"": ""RamUsage"", ""Label"": null, ""DurationMs"": 0 } ],
-  ""_note_TopLineItems"": ""Items for the top display line. Each item has: Type, Label, DurationMs, and type-specific fields (PollIntervalMs, EnableWarnIndicators, WarnTemp, CritTemp, SensorOverride for temp; WeatherLocation for weather; GpuPasteMonitoring, GpuPasteGapTemp for GPU temp)."",
-
-  ""BottomLineItems"": [ { ""Type"": ""GpuTemperature"", ""Label"": null, ""DurationMs"": 0, ""PollIntervalMs"": 2000, ""EnableWarnIndicators"": true, ""WarnTemp"": ""AUTO"", ""CritTemp"": ""AUTO"", ""GpuPasteMonitoring"": true, ""GpuPasteGapTemp"": 15 } ],
+  ""_note_TopLineItems"": ""Items for the top display line. For CPU/GPU temperature, a null PriorityThreshold follows the widget's warning temperature."",
   ""_note_BottomLineItems"": ""Items for the bottom display line. Same format as TopLineItems."",
 
-  ""RotationIntervalMs"": 3000,
-  ""_note_RotationIntervalMs"": ""Fallback display duration per item when DurationMs is 0. Only applies when a line has more than one item. Default: 3000 (3 seconds).""
-}";
+  ""_note_RotationIntervalMs"": ""Fallback display duration when a widget's DurationMs is 0. Default: 3000 (3 seconds).""
+}");
+                document["SettingsVersion"] = AppSettings.CurrentSettingsVersion;
+                document["ActiveDisplayPresetId"] = DisplayPreset.DefaultId;
+                DisplayLayout.Factory().WriteProjection(document);
+                return document.ToString(Formatting.Indented);
             }
 
-            private static AppSettings Migrate(AppSettings settings, string originalJson)
+            private static void Migrate(AppSettings settings, string originalJson, string path)
             {
                 try
                 {
                     var jo = JObject.Parse(originalJson);
-                    int ver = jo["SettingsVersion"]?.Value<int>() ?? 0;
-                    if (ver < 1)
-                    {
-                        jo["SettingsVersion"] = 1;
-                        ver = 1;
-                    }
-                    if (ver < 2) { jo["SettingsVersion"] = ver = 2; }
-                    // Missing optional HardwareId/OutputProfile fields retain their defaults.
-                    settings.SettingsVersion = ver;
-                    File.WriteAllText(SettingsFilePath, jo.ToString(Formatting.Indented));
+                    DisplayPreset.UpgradeLegacy(settings, jo);
+                    settings.SettingsVersion = AppSettings.CurrentSettingsVersion;
+                    jo["SettingsVersion"] = settings.SettingsVersion;
+                    WriteFile(path, jo.ToString(Formatting.Indented));
                 }
                 catch { }
-                return settings;
             }
         }
         public class LineItem
         {
             public string Type { get; set; } = "CpuTemperature";
+            public bool Hidden { get; set; }
             public string Label { get; set; } = null;
             public int DurationMs { get; set; } = 0;
             public bool UseFahrenheit { get; set; } = false;
@@ -558,6 +523,16 @@ namespace GGSystemMonitor
             public bool GpuPasteMonitoring { get; set; } = true;
             public int GpuPasteGapTemp { get; set; } = 15;
             public string WeatherLocation { get; set; } = "";
+            public string FontFamily { get; set; } = "";
+            public int FontSizeStep { get; set; }
+            public int PriorityMode { get; set; }
+            public int PriorityRank { get; set; } = 1;
+            public double? PriorityThreshold { get; set; }
+            public int RamPriorityUnit { get; set; }
+            public double? VisibilityThreshold { get; set; }
+            public bool VisibilityAtOrBelow { get; set; }
+
+            internal LineItem Copy() => (LineItem)MemberwiseClone();
 
             [System.Text.Json.Serialization.JsonIgnore]
             public string ListDisplayName
@@ -640,7 +615,7 @@ namespace GGSystemMonitor
                 if (list == null) continue;
                 foreach (var item in list)
                 {
-                    if (IsLineItemType(item, typeNorm) && item.PollIntervalMs > 0)
+                    if (IsLineItemType(item, typeNorm) && !item.Hidden && item.PollIntervalMs > 0)
                         min = Math.Min(min, item.PollIntervalMs);
                 }
             }
@@ -655,34 +630,9 @@ namespace GGSystemMonitor
                 if (list == null) continue;
                 foreach (var item in list)
                 {
-                    if (IsLineItemType(item, typeNorm) && !string.IsNullOrEmpty(item.SensorOverride))
+                    if (IsLineItemType(item, typeNorm) && !item.Hidden && !string.IsNullOrEmpty(item.SensorOverride))
                         return item.SensorOverride;
                 }
-            }
-            return null;
-        }
-
-        // Returns the currently-displayed GPU temperature LineItem (from bottom or top line), or null.
-        private static LineItem GetActiveGpuItem()
-        {
-            var botItems = settings?.BottomLineItems;
-            if (botItems != null && botItems.Count > 0)
-            {
-                var item = botItems[bottomLineIndex % botItems.Count];
-                if (IsLineItemType(item, "gputemperature")) return item;
-            }
-            var topItems = settings?.TopLineItems;
-            if (topItems != null && topItems.Count > 0)
-            {
-                var item = topItems[topLineIndex % topItems.Count];
-                if (IsLineItemType(item, "gputemperature")) return item;
-            }
-            // Fall back to first GPU item found
-            foreach (var list in new[] { botItems, topItems })
-            {
-                if (list == null) continue;
-                foreach (var item in list)
-                    if (IsLineItemType(item, "gputemperature")) return item;
             }
             return null;
         }
@@ -693,7 +643,7 @@ namespace GGSystemMonitor
             if (string.IsNullOrEmpty(setting) || setting.Equals("AUTO", StringComparison.OrdinalIgnoreCase))
                 return autoDefault;
             if (float.TryParse(setting, System.Globalization.NumberStyles.Any,
-                System.Globalization.CultureInfo.InvariantCulture, out float v))
+                System.Globalization.CultureInfo.InvariantCulture, out float v) && !float.IsNaN(v) && !float.IsInfinity(v))
                 return v;
             return autoDefault;
         }
@@ -755,8 +705,7 @@ namespace GGSystemMonitor
         private static void BindEvent()
         {
             // Build the bind payload using JObject so we can use hyphenated property names (device-type, has-text)
-            string deviceType = settings?.OutputProfile == "arctis" ? "screened-128x48" : settings?.OutputProfile == "gamedac" ? "screened-128x52" : _oledFont != null ? "screened-128x40" : "keyboard";
-            JObject datasEntry = _oledFont != null
+            JObject datasEntry = _bitmapFrame
                 ? new JObject(
                     new JProperty("has-text", false),
                     new JProperty("image-data", new JArray(OledBlankImageData)))
@@ -771,15 +720,19 @@ namespace GGSystemMonitor
                 new JProperty("event", EVENT_NAME),
                 new JProperty("handlers", new JArray(
                     new JObject(
-                        new JProperty("device-type", deviceType),
+                        new JProperty("device-type", ScreenBindingDevice()),
                         new JProperty("zone", "one"),
                         new JProperty("mode", "screen"),
                         new JProperty("datas", new JArray(datasEntry))
                     )))
             );
-            PostJson("/bind_game_event", bind);
+            _bindingReady = PostJson("/bind_game_event", bind);
+            _nextBindAttempt = RotationClock.ElapsedMilliseconds + 2000;
         }
-        private static string GetItemContent(LineItem lineItem)
+
+        private static string ScreenBindingDevice() => settings?.OutputProfile == "arctis" ? "screened-128x48" :
+            settings?.OutputProfile == "gamedac" ? "screened-128x52" : _bitmapFrame ? "screened-128x40" : "keyboard";
+        private static string GetItemContent(LineItem lineItem, WidgetReading reading)
         {
             string type = lineItem?.Type?.ToLower().Replace(" ", "").Replace("_", "") ?? "";
             if (type == "text")
@@ -809,22 +762,22 @@ namespace GGSystemMonitor
             }
 
             if (lineItem?.Label != null)
-                return ApplyLabelFormat(lineItem.Label, type, lineItem.UseFahrenheit, lineItem.UseRamMb, null);
+                return ApplyLabelFormat(lineItem.Label, type, lineItem.UseFahrenheit, lineItem.UseRamMb, null, reading.Value);
 
             switch (type)
             {
                 case "cputemperature":
-                    if (!cachedCpuTemp.HasValue) return "CPU: N/A";
-                    if (lineItem.UseFahrenheit) { double f = cachedCpuTemp.Value * 9.0 / 5.0 + 32.0; return $"CPU: {f:F1}°F"; }
-                    return $"CPU: {cachedCpuTemp.Value:F1}°C";
+                    if (!reading.Value.HasValue) return "CPU: N/A";
+                    if (lineItem.UseFahrenheit) { double f = reading.Value.Value * 9.0 / 5.0 + 32.0; return $"CPU: {f:F1}°F"; }
+                    return $"CPU: {reading.Value.Value:F1}°C";
                 case "cpuusage":
-                    return cachedCpuUsage.HasValue ? $"CPU USE: {cachedCpuUsage.Value:F0}%" : "CPU: N/A";
+                    return reading.Value.HasValue ? $"CPU USE: {reading.Value.Value:F0}%" : "CPU: N/A";
                 case "gputemperature":
-                    if (!cachedGpuTemp.HasValue) return "GPU: N/A";
-                    if (lineItem.UseFahrenheit) { double f = cachedGpuTemp.Value * 9.0 / 5.0 + 32.0; return $"GPU: {f:F1}°F"; }
-                    return $"GPU: {cachedGpuTemp.Value:F1}°C";
+                    if (!reading.Value.HasValue) return "GPU: N/A";
+                    if (lineItem.UseFahrenheit) { double f = reading.Value.Value * 9.0 / 5.0 + 32.0; return $"GPU: {f:F1}°F"; }
+                    return $"GPU: {reading.Value.Value:F1}°C";
                 case "gpuusage":
-                    return cachedGpuUsage.HasValue ? $"GPU USE: {cachedGpuUsage.Value:F0}%" : "GPU: N/A";
+                    return reading.Value.HasValue ? $"GPU USE: {reading.Value.Value:F0}%" : "GPU: N/A";
                 case "ramusage":
                     if (cachedRamUsed.HasValue && cachedRamTotal.HasValue)
                     {
@@ -855,15 +808,13 @@ namespace GGSystemMonitor
             }
         }
 
-        private static string ApplyLabelFormat(string label, string type, bool useFahrenheit, bool useRamMb, WeatherData wd = null)
+        private static string ApplyLabelFormat(string label, string type, bool useFahrenheit, bool useRamMb, WeatherData wd = null, double? reading = null)
         {
             string result = label;
 
             result = Regex.Replace(result, @"\{temp:([^}]+)\}", m =>
             {
-                double? raw = type == "cputemperature" ? cachedCpuTemp :
-                              type == "gputemperature" ? cachedGpuTemp :
-                              type == "weather"        ? wd?.TempC     : null;
+                double? raw = type == "weather" ? wd?.TempC : reading;
                 if (!raw.HasValue) return "N/A";
                 double val = useFahrenheit ? raw.Value * 9.0 / 5.0 + 32.0 : raw.Value;
                 try { return val.ToString(m.Groups[1].Value); } catch { return val.ToString("F1"); }
@@ -871,7 +822,7 @@ namespace GGSystemMonitor
 
             result = Regex.Replace(result, @"\{pct:([^}]+)\}", m =>
             {
-                double? raw = type == "cpuusage" ? cachedCpuUsage : cachedGpuUsage;
+                double? raw = reading;
                 if (!raw.HasValue) return "N/A";
                 try { return raw.Value.ToString(m.Groups[1].Value); } catch { return raw.Value.ToString("F0"); }
             });
@@ -949,15 +900,15 @@ namespace GGSystemMonitor
                 switch (type)
                 {
                     case "cputemperature":
-                        if (!cachedCpuTemp.HasValue) { legacy = "N/A"; break; }
-                        if (useFahrenheit) { double f = cachedCpuTemp.Value * 9.0 / 5.0 + 32.0; legacy = $"{f:F1}°F"; break; }
-                        legacy = $"{cachedCpuTemp.Value:F1}°C"; break;
-                    case "cpuusage":  legacy = cachedCpuUsage.HasValue ? $"{cachedCpuUsage.Value:F0}%" : "N/A"; break;
+                        if (!reading.HasValue) { legacy = "N/A"; break; }
+                        if (useFahrenheit) { double f = reading.Value * 9.0 / 5.0 + 32.0; legacy = $"{f:F1}°F"; break; }
+                        legacy = $"{reading.Value:F1}°C"; break;
+                    case "cpuusage":  legacy = reading.HasValue ? $"{reading.Value:F0}%" : "N/A"; break;
                     case "gputemperature":
-                        if (!cachedGpuTemp.HasValue) { legacy = "N/A"; break; }
-                        if (useFahrenheit) { double f = cachedGpuTemp.Value * 9.0 / 5.0 + 32.0; legacy = $"{f:F1}°F"; break; }
-                        legacy = $"{cachedGpuTemp.Value:F1}°C"; break;
-                    case "gpuusage":  legacy = cachedGpuUsage.HasValue ? $"{cachedGpuUsage.Value:F0}%" : "N/A"; break;
+                        if (!reading.HasValue) { legacy = "N/A"; break; }
+                        if (useFahrenheit) { double f = reading.Value * 9.0 / 5.0 + 32.0; legacy = $"{f:F1}°F"; break; }
+                        legacy = $"{reading.Value:F1}°C"; break;
+                    case "gpuusage":  legacy = reading.HasValue ? $"{reading.Value:F0}%" : "N/A"; break;
                     case "ramusage":
                         if (!cachedRamUsed.HasValue || !cachedRamTotal.HasValue) { legacy = "N/A"; break; }
                         if (useRamMb)
@@ -974,32 +925,6 @@ namespace GGSystemMonitor
 
             return result;
         }
-        // Returns how many display columns are reserved for indicators on a given line.
-        // 🡅 alone = 1 display col; ⚠🡅 or 🔥🡅 combined = 3 display cols; ⚠ or 🔥 alone = 1.
-        // The combined case reserves 3 (not 1+1=2) because the preceding temp indicator causes
-        // an extra display column to be consumed before 🡅 on this OLED firmware.
-        private static int GetReservedCols(bool isTopLine, LineItem item, bool capsLockActive)
-        {
-            string normalizedType = item?.Type?.ToLower().Replace(" ", "").Replace("_", "") ?? "";
-            bool tempActive = false;
-            if (item != null && item.EnableWarnIndicators)
-            {
-                if (normalizedType == "cputemperature" && cachedCpuTemp.HasValue)
-                {
-                    float warn = GetThresholdValue(item.WarnTemp, GetCpuAutoWarning(cpuHardware?.Name));
-                    tempActive = cachedCpuTemp.Value >= warn;
-                }
-                else if (normalizedType == "gputemperature" && cachedGpuTemp.HasValue)
-                {
-                    float warn = GetThresholdValue(item.WarnTemp, GetGpuAutoWarning(gpuHardware?.Name));
-                    tempActive = cachedGpuTemp.Value >= warn;
-                }
-            }
-            if (isTopLine && capsLockActive)
-                return tempActive ? 3 : 1;  // ⚠/🔥+🡅 = 3 cols; 🡅 alone = 1 col
-            return tempActive ? 1 : 0;
-        }
-
         private static List<string> GetTextElements(string text)
         {
             var elements = new List<string>();
@@ -1038,7 +963,11 @@ namespace GGSystemMonitor
             return units;
         }
 
-        private static string TakeNativeOledTextWindow(List<string> elements, int start, int availableCols)
+        private static (int Cols, int Units) MeasureNativeOledTextElement(string element, bool bitmap) =>
+            bitmap ? (NativeBitmapGlyphCols(element, NativeOledPixelFont.FindGlyph(element)), 0)
+                   : (GetNativeOledTextElementCols(element), GetNativeOledTextElementUnits(element));
+
+        private static string TakeNativeOledTextWindow(List<string> elements, int start, int availableCols, bool bitmap)
         {
             if (elements == null || elements.Count == 0 || availableCols <= 0) return "";
 
@@ -1048,8 +977,7 @@ namespace GGSystemMonitor
             for (int i = Math.Max(0, start); i < elements.Count; i++)
             {
                 string element = elements[i];
-                int nextCols = GetNativeOledTextElementCols(element);
-                int nextUnits = GetNativeOledTextElementUnits(element);
+                var (nextCols, nextUnits) = MeasureNativeOledTextElement(element, bitmap);
                 if (cols + nextCols > availableCols) break;
                 if (units + nextUnits > availableCols) break;
                 sb.Append(element);
@@ -1059,7 +987,7 @@ namespace GGSystemMonitor
             return sb.ToString();
         }
 
-        private static int GetNativeOledTextLastWindowStart(List<string> elements, int availableCols)
+        private static int GetNativeOledTextLastWindowStart(List<string> elements, int availableCols, bool bitmap)
         {
             if (elements == null || elements.Count == 0 || availableCols <= 0) return 0;
 
@@ -1068,8 +996,7 @@ namespace GGSystemMonitor
             int start = elements.Count;
             for (int i = elements.Count - 1; i >= 0; i--)
             {
-                int nextCols = GetNativeOledTextElementCols(elements[i]);
-                int nextUnits = GetNativeOledTextElementUnits(elements[i]);
+                var (nextCols, nextUnits) = MeasureNativeOledTextElement(elements[i], bitmap);
                 if (cols + nextCols > availableCols) break;
                 if (units + nextUnits > availableCols) break;
                 cols += nextCols;
@@ -1100,20 +1027,19 @@ namespace GGSystemMonitor
             return string.Concat(elements.Skip(Math.Min(offset, scrollDistance)).Take(availableCols));
         }
 
-        private static string ApplyNativeOledTextScroll(string content, int availableCols, int elapsed, int duration)
+        private static string ApplyNativeOledTextScroll(string content, int availableCols, int elapsed, int duration) =>
+            ApplyNativeTextScroll(content, availableCols, elapsed, duration, false);
+
+        private static string ApplyNativeTextScroll(string content, int availableCols, int elapsed, int duration, bool bitmap)
         {
             if (string.IsNullOrEmpty(content) || availableCols <= 0) return "";
 
             var elements = GetTextElements(content);
-            if (GetNativeOledTextCols(elements) <= availableCols &&
-                GetNativeOledTextUnits(elements) <= availableCols)
-            {
-                return content;
-            }
+            int scrollDistance = GetNativeOledTextLastWindowStart(elements, availableCols, bitmap);
+            if (scrollDistance == 0) return content;
             if (duration <= 0)
-                return TakeNativeOledTextWindow(elements, 0, availableCols);
+                return TakeNativeOledTextWindow(elements, 0, availableCols, bitmap);
 
-            int scrollDistance = GetNativeOledTextLastWindowStart(elements, availableCols);
             double t = Math.Max(0.0, Math.Min(1.0, elapsed / (double)duration));
 
             int offset;
@@ -1124,23 +1050,12 @@ namespace GGSystemMonitor
             else
                 offset = (int)Math.Round(scrollDistance * (t - 0.2) / 0.6);
 
-            return TakeNativeOledTextWindow(elements, Math.Min(offset, scrollDistance), availableCols);
-        }
-
-        // Returns a window of `availableCols` display columns from `content` based on elapsed time.
-        // Phase: 0–20% static at start, 20–80% scroll to end, 80–100% static at end.
-        private static string ApplyScroll(string content, int availableCols, int elapsed, int duration)
-        {
-            return _oledFont == null
-                ? ApplyNativeOledTextScroll(content, availableCols, elapsed, duration)
-                : ApplyCharacterScroll(content, availableCols, elapsed, duration);
+            return TakeNativeOledTextWindow(elements, Math.Min(offset, scrollDistance), availableCols, bitmap);
         }
 
         private static string PadRightForOledText(string text, int targetCols)
         {
             text = text ?? "";
-            if (_oledFont != null)
-                return text.PadRight(targetCols);
 
             var elements = GetTextElements(text);
             int cols = GetNativeOledTextCols(elements);
@@ -1161,105 +1076,138 @@ namespace GGSystemMonitor
             return AppendIndicator(line, DEFAULT_CAPS_LOCK_INDICATOR, 1);
         }
 
-        private static string ApplyTemperatureIndicators(string line, double temp, float warning, float critical, bool indicatorsEnabled, bool capsLock)
-        {
-            if (indicatorsEnabled && temp >= warning)
-            {
-                if (temp >= critical)
-                {
-                    // blink fire at 2Hz: phase 0 and 2 are "on" (250ms on, 250ms off)
-                    if ((_blinkPhase & 1) == 0)
-                        return capsLock ? AppendIndicator(line, "🔥🡅", 3) : AppendIndicator(line, "🔥", 1);
-                    return capsLock ? AppendCapsLockIndicator(line) : line;
-                }
-                // blink warning at 1Hz: phases 0-1 are "on" (500ms on, 500ms off)
-                if (_blinkPhase < 2)
-                    return capsLock ? AppendIndicator(line, "⚠🡅", 3) : AppendIndicator(line, "⚠", 1);
-                return capsLock ? AppendCapsLockIndicator(line) : line;
-            }
-            return capsLock ? AppendCapsLockIndicator(line) : line;
-        }
-        private static void BuildAndSendDisplay()
+        private static void BuildAndSendDisplay(long now)
         {
             lock (DisplayLock)
             {
-            string line1, line2;
-            CheckTestPattern();
-            if (DateTime.UtcNow < _testPatternUntil) { line1 = AppendCapsLockIndicator("12345678901234"); line2 = "OLED TEST 12345"; }
-            else if (AvailableVersion != null && settings.ShowUpdateNotifications && _updateNotifCycle >= 10000)
-            {
+                var a = Rotation.Top;
+                var b = Rotation.Bottom;
+                CheckTestPattern();
+                bool test = DateTime.UtcNow < _testPatternUntil;
+                bool update = AvailableVersion != null && settings.ShowUpdateNotifications && _updateNotifCycle >= 10000;
+                bool special = test || update;
+                var thermal = special ? default : SelectThermalAlerts(a.Item, b.Item, ThermalAlerts);
+                if (!_bindingReady)
+                {
+                    if (now < _nextBindAttempt) return;
+                    BindEvent();
+                    if (!_bindingReady) return;
+                }
+                Font topFont = _bitmapFrame ? (special ? _oledFont : GetWidgetFont(a.Item)) : null;
+                Font bottomFont = _bitmapFrame ? (special ? _oledFont : GetWidgetFont(b.Item)) : null;
                 bool capsLock = settings.ShowCapsLockIndicator && capsLockToggled;
-                line1 = capsLock ? AppendCapsLockIndicator("Update") : "Update";
-                line2 = "Available!";
-            }
-            else
-            {
-                line1 = BuildTopLine();
-                line2 = BuildBottomLine();
-            }
-            if (_oledFont != null) SendToOledImage(line1, line2);
-            else                   SendToOled(line1, line2);
+                string topSuffix, bottomSuffix = "", line1, line2;
+                if (special)
+                {
+                    topSuffix = test || capsLock ? DEFAULT_CAPS_LOCK_INDICATOR : "";
+                    line1 = test ? "12345678901234" : "Update";
+                    line2 = test ? "OLED TEST 12345" : "Available!";
+                }
+                else
+                {
+                    line1 = BuildWidgetLine(a, now, topFont, capsLock, out topSuffix, thermal.Top);
+                    line2 = BuildWidgetLine(b, now, bottomFont, false, out bottomSuffix, thermal.Bottom);
+                }
+                if (_bitmapFrame) SendToOledImage(line1, line2, topFont, bottomFont, topSuffix, bottomSuffix,
+                    !special && IsWeatherWidget(a.Item), !special && IsWeatherWidget(b.Item));
+                else SendToOled(AddNativeSuffix(line1, topSuffix), AddNativeSuffix(line2, bottomSuffix));
             }
         }
 
-        private static void SendToOledImage(string line1, string line2)
+        private static string AddNativeSuffix(string line, string suffix) => suffix.Length == 0 ? line :
+            PadRightForOledText(line, SCREEN_COLS - GetIndicatorLogicalCols(suffix)) + suffix;
+
+        private static void SendToOledImage(string line1, string line2, Font top, Font bottom, string topSuffix, string bottomSuffix,
+            bool topWeather = false, bool bottomWeather = false)
         {
-            var font = _oledFont;
-            if (font == null) { SendToOled(line1, line2); return; }
+            PostJsonText("/game_event", BuildImageEventJson(RenderOledBitmap(line1, line2, top, bottom, topSuffix, bottomSuffix,
+                topWeather, bottomWeather)));
+        }
 
-            int W = OLED_IMAGE_WIDTH, H = OLED_IMAGE_HEIGHT;
-            var bytes = new byte[W * H / 8];
-
-            using (var bmp = new Bitmap(W, H, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+        private static byte[] RenderOledBitmap(string line1, string line2, Font top, Font bottom, string topSuffix, string bottomSuffix,
+            bool topWeather, bool bottomWeather)
+        {
+            int height = OLED_IMAGE_HEIGHT;
+            if (_oledFrameBuffer == null || _oledFrameBuffer.Height != height)
             {
-                bmp.SetResolution(96, 96);
-                using (var g = Graphics.FromImage(bmp))
+                _oledFrameBuffer?.Dispose();
+                _oledFrameBuffer = new OledFrameBuffer(height);
+            }
+            return _oledFrameBuffer.Draw(line1, line2, top, bottom, topSuffix, bottomSuffix, topWeather, bottomWeather);
+        }
+
+        private sealed class OledFrameBuffer : IDisposable
+        {
+            private readonly Bitmap bitmap;
+            private readonly byte[] pixels;
+            private (string Top, string Bottom, Font TopFont, Font BottomFont, string TopSuffix, string BottomSuffix,
+                bool TopWeather, bool BottomWeather) last;
+            private bool hasFrame;
+            private string imageDataJson;
+
+            internal OledFrameBuffer(int height)
+            {
+                Height = height;
+                bitmap = new Bitmap(OLED_IMAGE_WIDTH, height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                bitmap.SetResolution(96, 96);
+                pixels = new byte[OLED_IMAGE_WIDTH * height * 4];
+                Packed = new byte[OLED_IMAGE_WIDTH * height / 8];
+            }
+
+            internal int Height { get; }
+            internal byte[] Packed { get; }
+            internal string ImageDataJson => imageDataJson ?? (imageDataJson = EncodeImageData(Packed));
+
+            internal byte[] Draw(string line1, string line2, Font top, Font bottom, string topSuffix, string bottomSuffix,
+                bool topWeather, bool bottomWeather)
+            {
+                var key = (line1, line2, top, bottom, topSuffix, bottomSuffix, topWeather, bottomWeather);
+                if (hasFrame && key.Equals(last)) return Packed;
+
+                var nativeTop = top == null ? LayoutNativeBitmapLine(line1, topSuffix) : null;
+                var nativeBottom = bottom == null ? LayoutNativeBitmapLine(line2, bottomSuffix) : null;
+                Array.Clear(Packed, 0, Packed.Length);
+                using (var graphics = Graphics.FromImage(bitmap))
                 {
-                    PrepareOledGraphics(g);
-                    // Brushes.White is a shared cached singleton — using `new SolidBrush(...)`
-                    // here would allocate a fresh GDI+ brush handle on every frame (4Hz).
-                    DrawOledImageLine(g, font, Brushes.White, line1, 0);
-                    DrawOledImageLine(g, font, Brushes.White, line2, H / 2f);
+                    PrepareOledGraphics(graphics);
+                    DrawOledImageLine(Packed, graphics, top, line1, topSuffix, 0, Height / 2, nativeTop, topWeather);
+                    DrawOledImageLine(Packed, graphics, bottom, line2, bottomSuffix, Height / 2, Height / 2, nativeBottom, bottomWeather);
                 }
 
-                // Scan pixels via a single LockBits instead of 5120 per-pixel GetPixel calls.
-                // GetPixel internally locks/unlocks the bitmap on every call, allocating a
-                // managed BitmapData wrapper each time — at 4Hz that's ~20K alloc/sec and the
-                // main cause of slow memory creep on this hot path.
-                var rect = new Rectangle(0, 0, W, H);
-                System.Drawing.Imaging.BitmapData data = bmp.LockBits(
-                    rect, System.Drawing.Imaging.ImageLockMode.ReadOnly,
+                // Reuse one packed frame and one pixel buffer, even as the content scrolls.
+                // The monitor serializes this borrowed buffer before drawing the next frame.
+                var rect = new Rectangle(0, 0, OLED_IMAGE_WIDTH, Height);
+                var data = bitmap.LockBits(rect, System.Drawing.Imaging.ImageLockMode.ReadOnly,
                     System.Drawing.Imaging.PixelFormat.Format32bppArgb);
                 try
                 {
-                    int stride = data.Stride;
-                    var pixels = new byte[stride * H];
                     System.Runtime.InteropServices.Marshal.Copy(data.Scan0, pixels, 0, pixels.Length);
-                    for (int y = 0; y < H; y++)
+                    for (int y = 0; y < Height; y++)
                     {
-                        int rowOffset = y * stride;
-                        for (int x = 0; x < W; x++)
+                        int rowOffset = y * data.Stride;
+                        for (int x = 0; x < OLED_IMAGE_WIDTH; x++)
                         {
-                            // Format32bppArgb layout in memory: B, G, R, A (little-endian).
-                            int idx = rowOffset + x * 4;
-                            byte b = pixels[idx];
-                            byte gC = pixels[idx + 1];
-                            byte r = pixels[idx + 2];
-                            // Color.GetBrightness formula: (max(r,g,b) + min(r,g,b)) / 2 / 255.
-                            int max = r > gC ? (r > b ? r : b) : (gC > b ? gC : b);
-                            int min = r < gC ? (r < b ? r : b) : (gC < b ? gC : b);
-                            if ((max + min) > 25) // (max+min)/2/255 > 0.05  =>  (max+min) > 25.5
-                                bytes[(y * W + x) / 8] |= (byte)(1 << (7 - (x % 8)));
+                            int i = rowOffset + x * 4;
+                            int blue = pixels[i], green = pixels[i + 1], red = pixels[i + 2];
+                            int max = Math.Max(blue, Math.Max(green, red));
+                            int min = Math.Min(blue, Math.Min(green, red));
+                            if (max + min > 25)
+                                Packed[(y * OLED_IMAGE_WIDTH + x) / 8] |= (byte)(1 << (7 - (x % 8)));
                         }
                     }
                 }
-                finally
-                {
-                    bmp.UnlockBits(data);
-                }
+                finally { bitmap.UnlockBits(data); }
+                BlitNativeBitmapLine(Packed, nativeTop, 0, Height / 2, topSuffix);
+                BlitNativeBitmapLine(Packed, nativeBottom, Height / 2, Height / 2, bottomSuffix);
+                BlitBitmapIndicators(Packed, 0, Height / 2, topSuffix);
+                BlitBitmapIndicators(Packed, Height / 2, Height / 2, bottomSuffix);
+                last = key;
+                hasFrame = true;
+                imageDataJson = null;
+                return Packed;
             }
 
-            PostJsonText("/game_event", BuildImageEventJson(bytes));
+            public void Dispose() => bitmap.Dispose();
         }
 
         private static void PrepareOledGraphics(Graphics g)
@@ -1277,48 +1225,17 @@ namespace GGSystemMonitor
             return format;
         }
 
-        private static int GetRenderedPixelWidth(Font font, string text)
+        private static float GetTextAdvanceWidth(Font font, string text) =>
+            MeasureOledText(font, text, inlineIcons: false, weather: false);
+
+        private static float MeasureOledText(Font font, string text, bool inlineIcons, bool weather)
         {
             if (string.IsNullOrEmpty(text)) return 0;
 
+            var key = (font, text, inlineIcons, weather);
             lock (OledFontMeasureLock)
             {
-                if (OledFontWidthCache.TryGetValue(text, out int cached))
-                    return cached;
-            }
-
-            int width = 0;
-            using (var bmp = new Bitmap(256, OLED_IMAGE_HEIGHT, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
-            using (var g = Graphics.FromImage(bmp))
-            using (var brush = new SolidBrush(Color.White))
-            using (var format = CreateOledStringFormat())
-            {
-                PrepareOledGraphics(g);
-                g.DrawString(text, font, brush, new PointF(0, 0), format);
-                for (int x = bmp.Width - 1; x >= 0; x--)
-                {
-                    for (int y = 0; y < bmp.Height; y++)
-                    {
-                        if (bmp.GetPixel(x, y).GetBrightness() > 0.05f)
-                        {
-                            width = x + 1;
-                            CacheOledFontWidth(text, width);
-                            return width;
-                        }
-                    }
-                }
-            }
-            CacheOledFontWidth(text, width);
-            return width;
-        }
-
-        private static float GetTextAdvanceWidth(Font font, string text)
-        {
-            if (string.IsNullOrEmpty(text)) return 0;
-
-            lock (OledFontMeasureLock)
-            {
-                if (OledFontAdvanceCache.TryGetValue(text, out float cached))
+                if (OledFontAdvanceCache.TryGetValue(key, out float cached))
                     return cached;
             }
 
@@ -1328,211 +1245,111 @@ namespace GGSystemMonitor
             using (var format = CreateOledStringFormat())
             {
                 PrepareOledGraphics(g);
-                width = g.MeasureString(text, font, new PointF(0, 0), format).Width;
+                width = inlineIcons ? LayoutCustomBitmapText(g, font, format, text, weather) :
+                    g.MeasureString(text, font, PointF.Empty, format).Width;
             }
 
-            CacheOledFontAdvance(text, width);
+            CacheOledFontAdvance(key, width);
             return width;
         }
 
-        private static void CacheOledFontWidth(string text, int width)
-        {
-            lock (OledFontMeasureLock)
-            {
-                if (OledFontWidthCache.Count >= OLED_FONT_MEASURE_CACHE_LIMIT)
-                    OledFontWidthCache.Clear();
-                OledFontWidthCache[text] = width;
-            }
-        }
-
-        private static void CacheOledFontAdvance(string text, float width)
+        private static void CacheOledFontAdvance((Font, string, bool, bool) key, float width)
         {
             lock (OledFontMeasureLock)
             {
                 if (OledFontAdvanceCache.Count >= OLED_FONT_MEASURE_CACHE_LIMIT)
                     OledFontAdvanceCache.Clear();
-                OledFontAdvanceCache[text] = width;
+                OledFontAdvanceCache[key] = width;
             }
-        }
-
-        private static string ExtractIndicatorSuffix(ref string line)
-        {
-            if (string.IsNullOrEmpty(line)) return "";
-
-            string trimmed = line.TrimEnd();
-            foreach (string suffix in new[] { "🔥🡅", "⚠🡅", "🡅", "🔥", "⚠" })
-            {
-                if (!trimmed.EndsWith(suffix, StringComparison.Ordinal)) continue;
-                line = trimmed.Substring(0, trimmed.Length - suffix.Length);
-                return suffix;
-            }
-
-            line = trimmed;
-            return "";
         }
 
         private static int GetIndicatorLogicalCols(string suffix)
         {
             if (string.IsNullOrEmpty(suffix)) return 0;
-            return suffix == "🔥🡅" || suffix == "⚠🡅" ? 3 : 1;
+            return suffix == TEMPERATURE_CRITICAL_INDICATOR + DEFAULT_CAPS_LOCK_INDICATOR ||
+                suffix == TEMPERATURE_WARNING_INDICATOR + DEFAULT_CAPS_LOCK_INDICATOR ? 3 : 1;
         }
 
-        private static int GetIndicatorPixelWidth(string suffix)
+        private static string ApplyBitmapScroll(string text, Font font, int width, int elapsed, int duration, bool weather)
         {
-            int cols = GetIndicatorLogicalCols(suffix);
-            return cols <= 0 ? 0 : Math.Min(OLED_IMAGE_WIDTH, cols * OLED_IMAGE_INDICATOR_COL_WIDTH);
-        }
-
-        private static string GetCustomFontIndicatorSuffix(string suffix)
-        {
-            return string.IsNullOrEmpty(suffix)
-                ? ""
-                : suffix.Replace(DEFAULT_CAPS_LOCK_INDICATOR, CUSTOM_FONT_CAPS_LOCK_INDICATOR);
-        }
-
-        private static void DrawTextFittedToBounds(Graphics g, Font font, Brush brush, string text, RectangleF bounds, System.Drawing.StringFormat format, bool expandToBounds)
-        {
-            if (string.IsNullOrWhiteSpace(text) || bounds.Width <= 0) return;
-
-            string trimmed = text.TrimEnd();
-            float advanceWidth = GetTextAdvanceWidth(font, trimmed);
-            if (advanceWidth <= 0) return;
-
-            var state = g.Save();
-            try
+            if (string.IsNullOrEmpty(text) || width <= 0) return "";
+            // Measure whole windows, not nominal characters: these fonts can be proportional.
+            bool Fits(string window) => MeasureOledText(font, window, inlineIcons: true, weather: weather) <= width - 1;
+            if (Fits(text)) return text;
+            var elements = GetTextElements(text);
+            int last = elements.Count - 1;
+            string tail = elements[last];
+            while (last > 0)
             {
-                g.SetClip(bounds);
-                if (expandToBounds || advanceWidth > bounds.Width)
-                {
-                    float scaleX = bounds.Width / advanceWidth;
-                    g.TranslateTransform(bounds.X, bounds.Y);
-                    g.ScaleTransform(scaleX, 1f);
-                    g.DrawString(trimmed, font, brush, new PointF(0, 0), format);
-                }
-                else
-                {
-                    g.DrawString(trimmed, font, brush, new PointF(bounds.X, bounds.Y), format);
-                }
+                string candidate = elements[last - 1] + tail;
+                if (!Fits(candidate)) break;
+                tail = candidate; last--;
             }
-            finally
+            double phase = duration <= 0 ? 0 : elapsed / (double)duration;
+            int offset = (int)Math.Round(last * Math.Max(0, Math.Min(1, (phase - 0.2) / 0.6)));
+            if (offset == last) return tail;
+            string window = "";
+            for (int i = offset; i < elements.Count; i++)
             {
-                g.Restore(state);
+                string candidate = window + elements[i];
+                if (window.Length > 0 && !Fits(candidate)) break;
+                window = candidate;
             }
+            return window;
         }
 
-        private static void DrawOledImageLine(Graphics g, Font font, Brush brush, string line, float y)
+        private static void DrawOledImageLine(byte[] packed, Graphics g, Font font, string line, string suffix, int y,
+            int rowHeight, List<NativePixelGlyph> nativeGlyphs, bool weather)
         {
-            string text = line ?? "";
-            string suffix = ExtractIndicatorSuffix(ref text);
-            string renderedSuffix = GetCustomFontIndicatorSuffix(suffix);
-
-            int suffixWidth = GetIndicatorPixelWidth(suffix);
-            int gap = suffixWidth > 0 ? 1 : 0;
-            int textWidth = Math.Max(0, OLED_IMAGE_WIDTH - suffixWidth - gap);
-            int logicalTextCols = Math.Max(1, DEFAULT_SCREEN_COLS - GetIndicatorLogicalCols(suffix));
-            bool expandText = text.TrimEnd().Length >= logicalTextCols;
-
             using (var format = CreateOledStringFormat())
             {
-                var textClip = new RectangleF(0, y, textWidth, OLED_IMAGE_HEIGHT / 2f);
-                DrawTextFittedToBounds(g, font, brush, text, textClip, format, expandText);
-
-                if (suffixWidth <= 0) return;
-
-                float suffixX = OLED_IMAGE_WIDTH - suffixWidth;
-                var suffixClip = new RectangleF(suffixX, y, suffixWidth, OLED_IMAGE_HEIGHT / 2f);
-                DrawTextFittedToBounds(g, font, brush, renderedSuffix, suffixClip, format, true);
-            }
-        }
-
-        private static string BuildTopLine()
-        {
-            bool capsLock = settings.ShowCapsLockIndicator && capsLockToggled;
-            var items = settings.TopLineItems;
-            var lineItem = (items != null && items.Count > 0) ? items[topLineIndex % items.Count] : new LineItem { Type = "CpuTemperature" };
-            string type = lineItem?.Type?.ToLower().Replace(" ", "").Replace("_", "") ?? "";
-            SelectWidgetHardware(lineItem);
-            string content = GetItemContent(lineItem);
-
-            int reservedCols = GetReservedCols(isTopLine: true, lineItem, capsLock);
-            int availableCols = SCREEN_COLS - reservedCols;
-            int elapsed = _topLineDuration > 0 ? _topLineDuration - topLineTimer : 0;
-            content = ApplyScroll(content, availableCols, elapsed, _topLineDuration);
-
-            switch (type)
-            {
-                case "cputemperature":
-                    if (cachedCpuTemp.HasValue)
-                    {
-                        float warn = GetThresholdValue(lineItem.WarnTemp, GetCpuAutoWarning(cpuHardware?.Name));
-                        float crit = GetThresholdValue(lineItem.CritTemp, GetCpuAutoCritical(cpuHardware?.Name));
-                        if (warn >= crit) warn = crit - 1;
-                        return ApplyTemperatureIndicators(content, cachedCpuTemp.Value, warn, crit, lineItem.EnableWarnIndicators, capsLock);
-                    }
-                    break;
-                case "gputemperature":
-                    if (cachedGpuTemp.HasValue)
-                    {
-                        float warn = GetThresholdValue(lineItem.WarnTemp, GetGpuAutoWarning(gpuHardware?.Name));
-                        float crit = GetThresholdValue(lineItem.CritTemp, GetGpuAutoCritical(gpuHardware?.Name));
-                        if (warn >= crit) warn = crit - 1;
-                        return ApplyTemperatureIndicators(content, cachedGpuTemp.Value, warn, crit, lineItem.EnableWarnIndicators, capsLock);
-                    }
-                    break;
-            }
-            return capsLock ? AppendCapsLockIndicator(content) : content;
-        }
-        private static string BuildBottomLine()
-        {
-            if (gpuPasteWarning)
-            {
-                // textScrollPos is advanced by the main loop only — not here — so that
-                // caps-lock key presses (which also call BuildAndSendDisplay) don't speed
-                // up the scroll or the GPU/hotspot display timing.
-                if (textScrollPos > PasteWarningText.Length)
+                var state = g.Save();
+                try
                 {
-                    if (textScrollPos < PasteWarningText.Length + 16)
-                        return cachedGpuTemp.HasValue   ? $"GPU: {cachedGpuTemp.Value:F1}°C"     : "GPU: N/A";
-                    return cachedHotspot.HasValue ? $"HOTSPOT: {cachedHotspot.Value:F1}°C" : "HOT SPOT: N/A";
+                    int textWidth = BitmapTextWidth(suffix);
+                    g.SetClip(new RectangleF(0, y, textWidth, rowHeight));
+                    if (nativeGlyphs != null)
+                        DrawNativeFallbackGlyphs(g, nativeGlyphs, Brushes.White, y, rowHeight, format);
+                    else if (!string.IsNullOrEmpty(line))
+                        LayoutCustomBitmapText(g, font, format, line, weather, packed, Brushes.White, y, rowHeight, textWidth);
                 }
-                int p = Math.Max(0, Math.Min(textScrollPos, PasteWarningText.Length));
-                return PasteWarningText.Substring(p) + PasteWarningText.Substring(0, p);
+                finally { g.Restore(state); }
             }
-
-            var items = settings.BottomLineItems;
-            var lineItem = (items != null && items.Count > 0) ? items[bottomLineIndex % items.Count] : new LineItem { Type = "GpuTemperature" };
-            string type = lineItem?.Type?.ToLower().Replace(" ", "").Replace("_", "") ?? "";
-            SelectWidgetHardware(lineItem);
-            string content = GetItemContent(lineItem);
-
-            int reservedCols = GetReservedCols(isTopLine: false, lineItem, false);
-            int availableCols = SCREEN_COLS - reservedCols;
-            int elapsed = _bottomLineDuration > 0 ? _bottomLineDuration - bottomLineTimer : 0;
-            content = ApplyScroll(content, availableCols, elapsed, _bottomLineDuration);
-
-            switch (type)
-            {
-                case "cputemperature":
-                    if (cachedCpuTemp.HasValue)
-                    {
-                        float warn = GetThresholdValue(lineItem.WarnTemp, GetCpuAutoWarning(cpuHardware?.Name));
-                        float crit = GetThresholdValue(lineItem.CritTemp, GetCpuAutoCritical(cpuHardware?.Name));
-                        if (warn >= crit) warn = crit - 1;
-                        return ApplyTemperatureIndicators(content, cachedCpuTemp.Value, warn, crit, lineItem.EnableWarnIndicators, false);
-                    }
-                    break;
-                case "gputemperature":
-                    if (cachedGpuTemp.HasValue)
-                    {
-                        float warn = GetThresholdValue(lineItem.WarnTemp, GetGpuAutoWarning(gpuHardware?.Name));
-                        float crit = GetThresholdValue(lineItem.CritTemp, GetGpuAutoCritical(gpuHardware?.Name));
-                        if (warn >= crit) warn = crit - 1;
-                        return ApplyTemperatureIndicators(content, cachedGpuTemp.Value, warn, crit, lineItem.EnableWarnIndicators, false);
-                    }
-                    break;
-            }
-            return content;
         }
+
+        private static string BuildWidgetLine(LineSelection selection, long now, Font font, bool caps, out string suffix, GpuThermalAlert thermal)
+        {
+            var item = selection.Item;
+            var reading = GetWidgetReading(item);
+            suffix = caps ? DEFAULT_CAPS_LOCK_INDICATOR : "";
+            if (thermal != null)
+            {
+                var frame = thermal.Frame(now, selection.Duration > 0 ? selection.Duration : settings.RotationIntervalMs);
+                return ScrollWidgetText(frame.Text, font, suffix, frame.Elapsed, frame.Duration);
+            }
+            string budget = suffix;
+            if (IsTemperatureWidget(item) && item.EnableWarnIndicators && reading.Value.HasValue)
+            {
+                if (reading.Value.Value >= reading.Warning) budget = TEMPERATURE_WARNING_INDICATOR + suffix;
+                if (reading.Value.Value >= reading.Critical)
+                    suffix = ((_blinkPhase & 1) == 0 ? TEMPERATURE_CRITICAL_INDICATOR : "") + suffix;
+                else if (reading.Value.Value >= reading.Warning)
+                    suffix = (_blinkPhase < 2 ? TEMPERATURE_WARNING_INDICATOR : "") + suffix;
+            }
+            if (item == null) return "";
+            return ScrollWidgetText(GetItemContent(item, reading), font, budget, selection.Elapsed(now), selection.Duration,
+                IsWeatherWidget(item));
+        }
+
+        private static string ScrollWidgetText(string text, Font font, string suffix, int elapsed, int duration, bool weather = false)
+        {
+            if (font != null)
+                return ApplyBitmapScroll(text, font, BitmapTextWidth(suffix), elapsed, duration, weather);
+            return _bitmapFrame
+                ? ApplyNativeTextScroll(text, NativeBitmapTextCols(suffix), elapsed, duration, true)
+                : ApplyNativeOledTextScroll(text, SCREEN_COLS - GetIndicatorLogicalCols(suffix), elapsed, duration);
+        }
+
         private static void SendToOled(string line1, string line2)
         {
             PostJsonText("/game_event", BuildTextEventJson(line1, line2));
@@ -1561,28 +1378,32 @@ namespace GGSystemMonitor
         private static string BuildImageEventJson(byte[] bytes)
         {
             int value = NextUpdateValue();
-            var sb = new StringBuilder(2800);
-            sb.Append("{\"game\":\"").Append(APP_NAME)
-              .Append("\",\"event\":\"").Append(EVENT_NAME)
-              .Append("\",\"data\":{\"value\":").Append(value)
-              .Append(",\"frame\":{\"image-data-128x" + OLED_IMAGE_HEIGHT + "\":[");
+            string image = ReferenceEquals(bytes, _oledFrameBuffer?.Packed)
+                ? _oledFrameBuffer.ImageDataJson : EncodeImageData(bytes);
+            return "{\"game\":\"" + APP_NAME + "\",\"event\":\"" + EVENT_NAME +
+                "\",\"data\":{\"value\":" + value.ToString() + ",\"frame\":{\"image-data-128x" + OLED_IMAGE_HEIGHT +
+                "\":[" + image + "]}}}";
+        }
+
+        private static string EncodeImageData(byte[] bytes)
+        {
+            var sb = new StringBuilder(bytes.Length * 3);
             for (int i = 0; i < bytes.Length; i++)
             {
                 if (i > 0) sb.Append(',');
                 sb.Append((int)bytes[i]);
             }
-            sb.Append("]}}}");
             return sb.ToString();
         }
 
-        private static void PostJson(string path, JObject obj)
+        private static bool PostJson(string path, JObject obj)
         {
-            PostJsonText(path, obj.ToString(Formatting.None));
+            return PostJsonText(path, obj.ToString(Formatting.None));
         }
 
-        private static void PostJsonText(string path, string json)
+        private static bool PostJsonText(string path, string json)
         {
-            if (baseUrl == null) return;
+            if (baseUrl == null) return false;
             try
             {
                 var url = baseUrl + path;
@@ -1596,6 +1417,7 @@ namespace GGSystemMonitor
                         AppendLog(
                             $"{DateTime.Now} - GameSense {(int)resp.StatusCode} for {path}: {body}{Environment.NewLine}");
                     }
+                    return resp.IsSuccessStatusCode;
                 }
             }
             catch (Exception ex)
@@ -1608,6 +1430,7 @@ namespace GGSystemMonitor
                     AppendLog( DateTime.Now + " - GG Engine connection lost: " + msg + Environment.NewLine);
                 }
                 baseUrl = null;
+                return false;
             }
         }
 
@@ -1617,8 +1440,6 @@ namespace GGSystemMonitor
             {
                 lock (OledFontMeasureLock)
                 {
-                    if (OledFontWidthCache.Count > OLED_FONT_MEASURE_CACHE_LIMIT / 2)
-                        OledFontWidthCache.Clear();
                     if (OledFontAdvanceCache.Count > OLED_FONT_MEASURE_CACHE_LIMIT / 2)
                         OledFontAdvanceCache.Clear();
                 }
@@ -1628,27 +1449,63 @@ namespace GGSystemMonitor
             catch { }
         }
 
+        // Windows fallback for symbols outside the pixel atlas and warning icons.
+        private static Font NativeBitmapFont() =>
+            _nativeBitmapFont ?? (_nativeBitmapFont = new Font("Consolas", 14, FontStyle.Bold, GraphicsUnit.Pixel));
+
+        private static Font GetWidgetFont(LineItem item)
+        {
+            if (string.Equals(item?.FontFamily, NativeWidgetFontId, StringComparison.Ordinal)) return null;
+            string family = string.IsNullOrWhiteSpace(item?.FontFamily) ? settings?.OledFont : item.FontFamily;
+            int size = item?.FontSizeStep ?? 0;
+            return GetFrameFont(family, size) ?? GetFrameFont(settings?.OledFont, size);
+        }
+
+        private static Font GetFrameFont(string family, int size)
+        {
+            if (string.IsNullOrWhiteSpace(family)) return null;
+            var key = (family.Trim(), Math.Max(0, Math.Min(2, size)));
+            if (FrameFonts.TryGetValue(key, out var existing)) return existing;
+            Font font = null;
+            try
+            {
+                font = new Font(key.Item1, 14 - key.Item2, GraphicsUnit.Pixel);
+                if (!font.Name.Equals(key.Item1, StringComparison.OrdinalIgnoreCase)) { font.Dispose(); font = null; }
+            }
+            catch (ArgumentException) { }
+            FrameFonts[key] = font;
+            return font;
+        }
+
+        private static void ReleaseFrameFonts()
+        {
+            _oledFrameBuffer?.Dispose();
+            _oledFrameBuffer = null;
+            lock (OledFontMeasureLock) OledFontAdvanceCache.Clear();
+            foreach (var font in FrameFonts.Values) font?.Dispose();
+            FrameFonts.Clear();
+            _nativeBitmapFont?.Dispose();
+            _nativeBitmapFont = _oledFont = null;
+        }
+
         private static void UpdateOledFont()
         {
-            string fontName = settings?.OledFont ?? "";
-            var old = _oledFont;
-            lock (OledFontMeasureLock)
-            {
-                OledFontWidthCache.Clear();
-                OledFontAdvanceCache.Clear();
-            }
-            if (string.IsNullOrEmpty(fontName))
-            {
-                _oledFont   = null;
-                SCREEN_COLS = DEFAULT_SCREEN_COLS;
-            }
-            else
-            {
-                var newFont = new Font(fontName, 14, GraphicsUnit.Pixel);
-                _oledFont = newFont;
-                SCREEN_COLS = DEFAULT_SCREEN_COLS;
-            }
-            old?.Dispose();
+            bool oldMode = _bitmapFrame;
+            ReleaseFrameFonts();
+            _oledFont = GetFrameFont(settings?.OledFont, 0);
+            bool HasCustomFont(List<LineItem> line) => line != null && line.Any(item => item != null && !item.Hidden && GetWidgetFont(item) != null);
+            // Keep a stable screen mode even when both currently visible rows
+            // use the default font, or a custom-font widget is skipped by a rule.
+            _bitmapFrame = HasCustomFont(settings?.TopLineItems) || HasCustomFont(settings?.BottomLineItems);
+            if (oldMode != _bitmapFrame) InvalidateScreenBinding();
+            WidgetReadings.Clear();
+            ThermalAlerts.Clear();
+        }
+
+        private static void InvalidateScreenBinding()
+        {
+            _bindingReady = false;
+            _nextBindAttempt = 0;
         }
 
         private static bool HasWeatherWidget()
@@ -1656,7 +1513,7 @@ namespace GGSystemMonitor
             var top = settings?.TopLineItems;
             var bot = settings?.BottomLineItems;
             bool Check(List<LineItem> list) => list != null && list.Any(
-                i => IsLineItemType(i, "weather"));
+                i => IsLineItemType(i, "weather") && !i.Hidden);
             return Check(top) || Check(bot);
         }
 
@@ -1665,7 +1522,7 @@ namespace GGSystemMonitor
             var top = settings?.TopLineItems;
             var bot = settings?.BottomLineItems;
             bool Check(List<LineItem> list) => list != null && list.Any(
-                i => IsLineItemType(i, "nowplaying"));
+                i => IsLineItemType(i, "nowplaying") && !i.Hidden);
             return Check(top) || Check(bot);
         }
 
@@ -1676,7 +1533,7 @@ namespace GGSystemMonitor
             if (!_hasNowPlayingWidget) ClearNowPlaying();
         }
 
-        private static bool IsLineItemType(LineItem item, string normalizedType)
+        internal static bool IsLineItemType(LineItem item, string normalizedType)
         {
             string type = item?.Type;
             if (string.IsNullOrEmpty(type)) return false;
@@ -1697,6 +1554,7 @@ namespace GGSystemMonitor
         {
             _nowPlayingTitle = _nowPlayingArtist = _nowPlayingAlbum = _nowPlayingAppId = null;
             _nowPlayingIsPaused = false;
+            _mediaActivity = null;
             _nowPlayingPosition = _nowPlayingDuration = null;
             _nowPlayingPositionTime = DateTime.MinValue;
             _nowPlayingSongKey = null;
@@ -1710,7 +1568,7 @@ namespace GGSystemMonitor
             {
                 if (list == null) continue;
                 foreach (var item in list)
-                    if (IsLineItemType(item, "weather"))
+                    if (IsLineItemType(item, "weather") && !item.Hidden)
                         locs.Add(item.WeatherLocation ?? "");
             }
             lock (_weatherByLocation) foreach (var oldKey in _weatherByLocation.Keys.Where(k => !locs.Contains(k)).ToArray()) _weatherByLocation.Remove(oldKey);
@@ -2062,6 +1920,7 @@ namespace GGSystemMonitor
                 {
                     _nowPlayingTitle = _nowPlayingArtist = _nowPlayingAlbum = _nowPlayingAppId = null;
                     _nowPlayingIsPaused = false;
+                    _mediaActivity = null;
                     _nowPlayingPosition = _nowPlayingDuration = null;
                     _nowPlayingPositionTime = DateTime.MinValue;
                     _nowPlayingSongKey = null;
@@ -2154,6 +2013,7 @@ namespace GGSystemMonitor
                 {
                     _nowPlayingTitle = _nowPlayingArtist = _nowPlayingAlbum = _nowPlayingAppId = null;
                     _nowPlayingIsPaused = false;
+                    _mediaActivity = null;
                     _nowPlayingPosition = _nowPlayingDuration = null;
                     _nowPlayingPositionTime = DateTime.MinValue;
                     _nowPlayingSongKey = null;
@@ -2181,6 +2041,8 @@ namespace GGSystemMonitor
                 _nowPlayingArtist   = string.IsNullOrEmpty(artist) ? null : artist;
                 _nowPlayingAlbum    = string.IsNullOrEmpty(album)  ? null : album;
                 _nowPlayingIsPaused = isPaused;
+                // Only a session explicitly reported as playing can activate Playing-only.
+                bool isPlaying = currentStatus == 4 || playingSession != null;
 
                 // Reset position base whenever the song changes so the new song's first poll
                 // always seeds the extrapolation, regardless of the previous song's position.
@@ -2244,6 +2106,7 @@ namespace GGSystemMonitor
                 }
                 catch { _nowPlayingPosition = _nowPlayingDuration = null; _nowPlayingPositionTime = DateTime.MinValue; }
 
+                _mediaActivity = new MediaActivity(chosenAppId, chosenAppId + ":" + songKey, isPlaying);
                 _smtcLoggedError    = false;
             }
             catch (Exception ex)
@@ -2289,10 +2152,13 @@ namespace GGSystemMonitor
                     int dash = wt.IndexOf(" - ", StringComparison.Ordinal);
                     if (dash > 0)
                     {
+                        ClearNowPlaying();
                         _nowPlayingArtist = wt.Substring(0, dash);
                         _nowPlayingTitle  = wt.Substring(dash + 3);
                         _nowPlayingAlbum  = null;
                         _nowPlayingAppId  = "spotify";
+                        _nowPlayingSongKey = wt;
+                        _mediaActivity = new MediaActivity(_nowPlayingAppId, wt, false);
                         return;
                     }
                 }
@@ -2302,25 +2168,19 @@ namespace GGSystemMonitor
             {
                 DisposeProcesses(spotifyProcesses);
             }
+            ClearNowPlaying();
         }
 
-        private static bool IsNowPlayingSourceAllowed(LineItem item)
+        private static bool IsNowPlayingSourceAllowed(LineItem item) => IsNowPlayingSourceAllowed(item, _nowPlayingAppId);
+
+        private static bool IsNowPlayingSourceAllowed(LineItem item, string source)
         {
             if (item == null) return true;
-            string appId = (_nowPlayingAppId ?? "").ToLower();
+            string appId = (source ?? "").ToLowerInvariant();
             if (appId.Contains("spotify")) return item.NowPlayingSpotify;
             if (appId.Contains("chrome") || appId.Contains("msedge") || appId.Contains("edge") ||
                 appId.Contains("firefox") || appId.Contains("brave")) return item.NowPlayingYouTube;
             return item.NowPlayingOtherPlayer;
-        }
-
-        private static bool ShouldSkipItem(LineItem item)
-        {
-            if (item == null) return false;
-            if (!IsLineItemType(item, "nowplaying")) return false;
-            if (!item.SkipIfNotPlaying) return false;
-            if (_nowPlayingTitle == null && _nowPlayingArtist == null) return true;
-            return !IsNowPlayingSourceAllowed(item);
         }
 
         private static string GetWeatherIcon(string condition, int blinkPhase)
@@ -2638,33 +2498,136 @@ namespace GGSystemMonitor
 
             return null;
         }
-        private static double? GetGpuHotSpot()
+        private static readonly Dictionary<string, float> CpuMaxTemps = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase)
         {
-            if (gpuHardware == null) return null;
-
-            // Match "hot spot", "hotspot", or "junction" temperature sensors
-            bool IsHotspotSensor(ISensor s) =>
-                s.SensorType == SensorType.Temperature && s.Name != null &&
-                (s.Name.ToLower().Contains("hot spot") ||
-                 s.Name.ToLower().Contains("hotspot") ||
-                 s.Name.ToLower().Contains("junction"));
-
-            var sensor = gpuHardware.Sensors.FirstOrDefault(IsHotspotSensor);
-            if (sensor?.Value.HasValue == true)
-                return (double)sensor.Value.Value;
-
-            // Some drivers expose hotspot/junction under subhardware
-            foreach (var sub in gpuHardware.SubHardware)
-            {
-                sub.Update();
-                var subSensor = sub.Sensors.FirstOrDefault(IsHotspotSensor);
-                if (subSensor?.Value.HasValue == true)
-                    return (double)subSensor.Value.Value;
-            }
-            return null;
-        }
-        private static readonly Dictionary<string, float> CpuMaxTemps = new Dictionary<string, float>
-        {
+            // Sources for the new entries: Intel ARK and AMD's individual
+            // processor specifications (Maximum Operating Temperature / Tjmax).
+            // Intel Core Ultra Series 3 (Intel ARK)
+            { "Intel Core Ultra 5 338H", 100.0f },
+            { "Intel Core Ultra 5 335", 100.0f },
+            { "Intel Core Ultra 5 332", 100.0f },
+            { "Intel Core Ultra 5 325", 100.0f },
+            { "Intel Core Ultra 5 322", 100.0f },
+            { "Intel Core Ultra 7 366H", 100.0f },
+            { "Intel Core Ultra 7 365", 100.0f },
+            { "Intel Core Ultra 7 356H", 100.0f },
+            { "Intel Core Ultra 7 355", 100.0f },
+            { "Intel Core Ultra 9 386H", 100.0f },
+            { "Intel Core Ultra X7 368H", 100.0f },
+            { "Intel Core Ultra X7 358H", 100.0f },
+            { "Intel Core Ultra X9 388H", 100.0f },
+            { "Intel Core Ultra X9 378H", 100.0f },
+            // Intel Core Ultra Series 2 (Intel ARK). H/U, HX, V and desktop limits differ.
+            { "Intel Core Ultra 5 250KF Plus", 105.0f },
+            { "Intel Core Ultra 5 250K Plus", 105.0f },
+            { "Intel Core Ultra 5 245T", 105.0f },
+            { "Intel Core Ultra 5 245KF", 105.0f },
+            { "Intel Core Ultra 5 245K", 105.0f },
+            { "Intel Core Ultra 5 245HX", 105.0f },
+            { "Intel Core Ultra 5 245", 105.0f },
+            { "Intel Core Ultra 5 238V", 100.0f },
+            { "Intel Core Ultra 5 236V", 100.0f },
+            { "Intel Core Ultra 5 235U", 110.0f },
+            { "Intel Core Ultra 5 235T", 105.0f },
+            { "Intel Core Ultra 5 235HX", 105.0f },
+            { "Intel Core Ultra 5 235H", 110.0f },
+            { "Intel Core Ultra 5 235", 105.0f },
+            { "Intel Core Ultra 5 230F", 105.0f },
+            { "Intel Core Ultra 5 228V", 100.0f },
+            { "Intel Core Ultra 5 226V", 100.0f },
+            { "Intel Core Ultra 5 225U", 110.0f },
+            { "Intel Core Ultra 5 225T", 105.0f },
+            { "Intel Core Ultra 5 225H", 110.0f },
+            { "Intel Core Ultra 5 225F", 105.0f },
+            { "Intel Core Ultra 5 225", 105.0f },
+            { "Intel Core Ultra 7 270K Plus", 105.0f },
+            { "Intel Core Ultra 7 270HX Plus", 105.0f },
+            { "Intel Core Ultra 7 268V", 100.0f },
+            { "Intel Core Ultra 7 266V", 100.0f },
+            { "Intel Core Ultra 7 265U", 110.0f },
+            { "Intel Core Ultra 7 265T", 105.0f },
+            { "Intel Core Ultra 7 265KF", 105.0f },
+            { "Intel Core Ultra 7 265K", 105.0f },
+            { "Intel Core Ultra 7 265HX", 105.0f },
+            { "Intel Core Ultra 7 265H", 110.0f },
+            { "Intel Core Ultra 7 265F", 105.0f },
+            { "Intel Core Ultra 7 265", 105.0f },
+            { "Intel Core Ultra 7 258V", 100.0f },
+            { "Intel Core Ultra 7 256V", 100.0f },
+            { "Intel Core Ultra 7 255U", 110.0f },
+            { "Intel Core Ultra 7 255HX", 105.0f },
+            { "Intel Core Ultra 7 255H", 110.0f },
+            { "Intel Core Ultra 9 290HX Plus", 105.0f },
+            { "Intel Core Ultra 9 288V", 100.0f },
+            { "Intel Core Ultra 9 285T", 105.0f },
+            { "Intel Core Ultra 9 285K", 105.0f },
+            { "Intel Core Ultra 9 285HX", 105.0f },
+            { "Intel Core Ultra 9 285H", 110.0f },
+            { "Intel Core Ultra 9 285", 105.0f },
+            { "Intel Core Ultra 9 275HX", 105.0f },
+            // Intel Core Ultra Series 1 (Meteor Lake U/H; Intel datasheet 792044).
+            { "Intel Core Ultra 9 185H", 110.0f },
+            { "Intel Core Ultra 7 165H", 110.0f },
+            { "Intel Core Ultra 7 155H", 110.0f },
+            { "Intel Core Ultra 7 165U", 110.0f },
+            { "Intel Core Ultra 7 155U", 110.0f },
+            { "Intel Core Ultra 5 135H", 110.0f },
+            { "Intel Core Ultra 5 125H", 110.0f },
+            { "Intel Core Ultra 5 135U", 110.0f },
+            { "Intel Core Ultra 5 125U", 110.0f },
+            // AMD Ryzen 9000 desktop; Ryzen 9000 HX is listed separately.
+            { "AMD Ryzen 9 9950X3D2", 95.0f },
+            { "AMD Ryzen 9 9950X3D", 95.0f },
+            { "AMD Ryzen 9 9950X", 95.0f },
+            { "AMD Ryzen 9 9900X3D", 95.0f },
+            { "AMD Ryzen 9 9900X", 95.0f },
+            { "AMD Ryzen 7 9850X3D", 95.0f },
+            { "AMD Ryzen 7 9800X3D", 95.0f },
+            { "AMD Ryzen 7 9700X", 95.0f },
+            { "AMD Ryzen 7 9700F", 95.0f },
+            { "AMD Ryzen 5 9600X", 95.0f },
+            { "AMD Ryzen 5 9600", 95.0f },
+            { "AMD Ryzen 5 9500F", 95.0f },
+            // AMD Ryzen 9000 HX
+            { "AMD Ryzen 9 9955HX3D", 100.0f },
+            { "AMD Ryzen 9 9955HX", 100.0f },
+            { "AMD Ryzen 9 9850HX", 100.0f },
+            // AMD Ryzen 8000 desktop
+            { "AMD Ryzen 7 8700G", 95.0f },
+            { "AMD Ryzen 7 8700F", 95.0f },
+            { "AMD Ryzen 5 8600G", 95.0f },
+            { "AMD Ryzen 5 8500G", 95.0f },
+            { "AMD Ryzen 5 8500GE", 95.0f },
+            { "AMD Ryzen 5 8400F", 95.0f },
+            { "AMD Ryzen 3 8300G", 95.0f },
+            // AMD Ryzen AI 400, 300 and Ryzen AI Max
+            { "AMD Ryzen AI 9 HX 475", 100.0f },
+            { "AMD Ryzen AI 9 HX 470", 100.0f },
+            { "AMD Ryzen AI 9 465", 100.0f },
+            { "AMD Ryzen AI 7 450", 100.0f },
+            { "AMD Ryzen AI 7 445", 100.0f },
+            { "AMD Ryzen AI 5 435", 100.0f },
+            { "AMD Ryzen AI 5 430", 100.0f },
+            { "AMD Ryzen AI 9 HX 375", 100.0f },
+            { "AMD Ryzen AI 9 HX 370", 100.0f },
+            { "AMD Ryzen AI 9 365", 100.0f },
+            { "AMD Ryzen AI 7 350", 100.0f },
+            { "AMD Ryzen AI 5 340", 100.0f },
+            { "AMD Ryzen AI 5 330", 100.0f },
+            { "AMD Ryzen AI Max+ 395", 100.0f },
+            { "AMD Ryzen AI Max+ 392", 100.0f },
+            { "AMD Ryzen AI Max 390", 100.0f },
+            { "AMD Ryzen AI Max 385", 100.0f },
+            // AMD Threadripper 9000 and PRO 9000 WX
+            { "AMD Ryzen Threadripper 9980X", 95.0f },
+            { "AMD Ryzen Threadripper 9970X", 95.0f },
+            { "AMD Ryzen Threadripper 9960X", 95.0f },
+            { "AMD Ryzen Threadripper PRO 9995WX", 95.0f },
+            { "AMD Ryzen Threadripper PRO 9985WX", 95.0f },
+            { "AMD Ryzen Threadripper PRO 9975WX", 95.0f },
+            { "AMD Ryzen Threadripper PRO 9965WX", 95.0f },
+            { "AMD Ryzen Threadripper PRO 9955WX", 95.0f },
+            { "AMD Ryzen Threadripper PRO 9945WX", 95.0f },
             // Intel 14th Gen (TjMax 100°C)
             { "Intel Core i9-14900KS",  100.0f },
             { "Intel Core i9-14900K",   100.0f },
@@ -2797,6 +2760,8 @@ namespace GGSystemMonitor
             { "Intel Core i3-6320",     100.0f },
             { "Intel Core i3-6100",     100.0f },
             // AMD Ryzen 7000 X3D (TjMax 89°C)
+            { "AMD Ryzen 5 7600X3D",     89.0f },
+            { "AMD Ryzen 5 7500X3D",     89.0f },
             { "AMD Ryzen 9 7950X3D",     89.0f },
             { "AMD Ryzen 9 7900X3D",     89.0f },
             { "AMD Ryzen 7 7800X3D",     89.0f },
@@ -2808,6 +2773,7 @@ namespace GGSystemMonitor
             { "AMD Ryzen 7 7700",        95.0f },
             { "AMD Ryzen 5 7600X",       95.0f },
             { "AMD Ryzen 5 7600",        95.0f },
+            { "AMD Ryzen 5 7500F",       95.0f },
             // AMD Ryzen 5000
             { "AMD Ryzen 9 5950X",       90.0f },
             { "AMD Ryzen 9 5900X",       90.0f },
@@ -2863,17 +2829,23 @@ namespace GGSystemMonitor
             { "AMD Ryzen 3 1200",        95.0f },
         };
 
-        private static readonly Dictionary<string, float> GpuMaxTemps = new Dictionary<string, float>
+        private static readonly Dictionary<string, float> GpuMaxTemps = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase)
         {
-            // NVIDIA RTX 50 Series
+            // NVIDIA RTX 50 desktop reference specifications. Do not use these for laptop models.
+            // https://www.nvidia.com/en-us/geforce/graphics-cards/compare/
             { "NVIDIA GeForce RTX 5090",          90.0f },
+            // https://www.nvidia.cn/geforce/graphics-cards/50-series/rtx-5090-d-v2/
+            { "NVIDIA GeForce RTX 5090 D v2",     90.0f },
             { "NVIDIA GeForce RTX 5080",          88.0f },
             { "NVIDIA GeForce RTX 5070 Ti",       88.0f },
             { "NVIDIA GeForce RTX 5070",          85.0f },
-            { "NVIDIA GeForce RTX 5060 Ti",       90.0f },
-            { "NVIDIA GeForce RTX 5060",          90.0f },
+            { "NVIDIA GeForce RTX 5060 Ti",       87.0f },
+            { "NVIDIA GeForce RTX 5060",          89.0f },
+            { "NVIDIA GeForce RTX 5050",          87.0f },
             // NVIDIA RTX 40 Series
             { "NVIDIA GeForce RTX 4090",          90.0f },
+            // https://www.nvidia.cn/geforce/graphics-cards/40-series/rtx-4090-d/
+            { "NVIDIA GeForce RTX 4090 D",        90.0f },
             { "NVIDIA GeForce RTX 4080 Super",    90.0f },
             { "NVIDIA GeForce RTX 4080",          90.0f },
             { "NVIDIA GeForce RTX 4070 Ti Super", 90.0f },
@@ -2893,6 +2865,8 @@ namespace GGSystemMonitor
             { "NVIDIA GeForce RTX 3060 Ti",       93.0f },
             { "NVIDIA GeForce RTX 3060",          93.0f },
             { "NVIDIA GeForce RTX 3050",          93.0f },
+            { "NVIDIA GeForce RTX 3050 6GB",      93.0f },
+            { "NVIDIA GeForce RTX 3050 8GB",      93.0f },
             // NVIDIA RTX 20 Series
             { "NVIDIA GeForce RTX 2080 Ti",       89.0f },
             { "NVIDIA GeForce RTX 2080 Super",    89.0f },
@@ -2954,26 +2928,32 @@ namespace GGSystemMonitor
         };
 
         internal static bool IsCpuNameInDictionary(string name) =>
-            !string.IsNullOrEmpty(name) && CpuMaxTemps.ContainsKey(NormalizeCpuName(name));
+            TryGetCpuMaximum(name, out _);
 
         internal static bool IsGpuNameInDictionary(string name) =>
-            !string.IsNullOrEmpty(name) && GpuMaxTemps.ContainsKey(name);
+            TryGetGpuMaximum(name, out _);
 
-        internal static float GetCpuMaximum(string CpuName)
+        private static bool TryGetCpuMaximum(string name, out float maximum)
         {
-            if (string.IsNullOrEmpty(CpuName)) return 100.0f;
-            if (CpuMaxTemps.TryGetValue(NormalizeCpuName(CpuName), out float v)) return v;
-            if (CpuName.Contains("Intel")) return 100.0f;
-            return 95.0f;
+            maximum = 0;
+            return !string.IsNullOrWhiteSpace(name) &&
+                (CpuMaxTemps.TryGetValue(name, out maximum) || CpuMaxTemps.TryGetValue(NormalizeCpuName(name), out maximum));
         }
 
-        internal static float GetGpuMaximum(string GpuName)
+        private static bool TryGetGpuMaximum(string name, out float maximum)
         {
-            if (string.IsNullOrEmpty(GpuName)) return 92.0f;
-            if (GpuMaxTemps.TryGetValue(GpuName, out float v)) return v;
-            if (GpuName.Contains("AMD Radeon")) return 110.0f;
-            return 92.0f;
+            maximum = 0;
+            return !string.IsNullOrWhiteSpace(name) &&
+                (GpuMaxTemps.TryGetValue(name, out maximum) || GpuMaxTemps.TryGetValue(NormalizeGpuName(name), out maximum));
         }
+
+        internal static float GetCpuMaximum(string name) =>
+            TryGetCpuMaximum(name, out var maximum) ? maximum :
+                (string.IsNullOrWhiteSpace(name) || name.IndexOf("Intel", StringComparison.OrdinalIgnoreCase) >= 0 ? 100f : 95f);
+
+        internal static float GetGpuMaximum(string name) =>
+            TryGetGpuMaximum(name, out var maximum) ? maximum :
+                (name?.IndexOf("AMD Radeon", StringComparison.OrdinalIgnoreCase) >= 0 ? 110f : 92f);
 
         // Auto critical = TJMax rounded down to the nearest 5°C below TJMax-3
         // e.g. TJMax 93 → 90, TJMax 100 → 95, TJMax 110 → 105

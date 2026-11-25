@@ -41,80 +41,162 @@ function Resolve-SetupDestination([string]$Path, [string]$Source, [string]$ExeNa
     return $target
 }
 
-function Stop-InstalledMonitor([string]$ExePath) {
-    $deadline = [Diagnostics.Stopwatch]::StartNew()
-    do {
-        $remaining = $false
-        foreach ($process in @(Get-Process -Name GGSystemMonitor -ErrorAction SilentlyContinue)) {
+function Stop-InstalledMonitor([string]$ExePath, [scriptblock]$OnStatus = {}, [scriptblock]$Pulse = {}) {
+    $all = @(Get-Process -Name GGSystemMonitor -ErrorAction SilentlyContinue)
+    if (-not $all.Count) { return }
+    $signal = $null
+    try {
+        $ours = @($all | Where-Object { -not $_.HasExited -and $_.Path -eq $ExePath })
+        if (-not $ours.Count) { return }
+        # The monitor stop event is per user, not per install directory.
+        # Don't signal it when another copy may be running in this session.
+        $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        if ($ours.Count -eq $all.Count) {
             try {
-                if ($process.Path -ne $ExePath -or $process.HasExited) { continue }
-                $process.Kill()
-                if (-not $process.WaitForExit(500)) { $remaining = $true }
-            } catch {
-                if (-not $process.HasExited) { throw "Could not stop the installed GGSystemMonitor process: $($_.Exception.Message)" }
-            } finally { $process.Dispose() }
+                $signal = [Threading.EventWaitHandle]::OpenExisting("Local\GGSystemMonitor.Stop.$sid")
+                $signal.Set() | Out-Null
+            } catch [Threading.WaitHandleCannotBeOpenedException] {}
+            catch { & $OnStatus "Graceful stop signal unavailable: $($_.Exception.Message)" | Out-Null }
         }
-        if (-not $remaining) { return }
-    } while ($deadline.Elapsed.TotalSeconds -lt 5)
-    throw "GGSystemMonitor did not stop. Close it or restart Windows, then retry setup."
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        foreach ($process in $ours) {
+            if ($process.HasExited) { continue }
+            $closed = $process.CloseMainWindow()
+            if (($closed -or $signal) -and (Wait-SetupProcess $process ([int][Math]::Max(0, 5000 - $clock.ElapsedMilliseconds)) $Pulse)) { continue }
+            if (-not $process.HasExited) {
+                & $OnStatus "Closing PID $($process.Id) after it did not exit gracefully." | Out-Null
+                try { $process.Kill() } catch { if (-not $process.HasExited) { throw } }
+                if (-not (Wait-SetupProcess $process 2000 $Pulse)) { throw "GGSystemMonitor did not stop. Close it or restart Windows and retry." }
+            }
+        }
+    } finally {
+        if ($signal) { $signal.Dispose() }
+        foreach ($process in $all) { $process.Dispose() }
+    }
 }
 
-function Invoke-LegacyDriverCommand([string]$Action, [string]$Name) {
+function Wait-SetupProcess($Process, [int]$Milliseconds, [scriptblock]$Pulse) {
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        $remaining = [Math]::Max(0, $Milliseconds - $clock.ElapsedMilliseconds)
+        if ($Process.WaitForExit([int][Math]::Min(150, $remaining))) { return $true }
+        & $Pulse | Out-Null
+    } while ($clock.ElapsedMilliseconds -lt $Milliseconds)
+    return $false
+}
+
+function Assert-UnlinkedSetupPath([string]$Path) {
+    $full = [IO.Path]::GetFullPath($Path)
+    if ($full -notmatch '^[A-Za-z]:\\') { throw "Choose a local installation folder." }
+    for ($part = $full; $part; $part = [IO.Path]::GetDirectoryName($part)) {
+        if (Test-Path -LiteralPath $part) {
+            $item = Get-Item -LiteralPath $part -Force -ErrorAction Stop
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "Setup will not modify a linked file or directory: '$part'."
+            }
+        }
+    }
+}
+
+function Invoke-LegacyDriverCommand([string]$Action, [string]$Name, [scriptblock]$Pulse = {}) {
     $process = Start-Process -FilePath "$env:WINDIR\System32\sc.exe" -ArgumentList @($Action, ('"{0}"' -f $Name)) -WindowStyle Hidden -PassThru -ErrorAction Stop
     try {
-        if (-not $process.WaitForExit(8000)) { throw "Windows did not finish trying to $Action legacy driver '$Name'. Restart Windows and try again." }
+        if (-not (Wait-SetupProcess $process 5000 $Pulse)) { throw "Windows timed out trying to $Action legacy service '$Name'." }
         $code = $process.ExitCode
-        if ($code -notin @(0, 1060, 1062, 1072)) { throw "Could not $Action legacy driver '$Name' (Windows error $code). Restart Windows and try again." }
+        if ($code -notin @(0, 1060, 1062, 1072)) { throw "Could not $Action legacy service '$Name' (Windows error $code)." }
     } finally { $process.Dispose() }
 }
 
-function Stop-HardwareMonitorDrivers([string]$TargetDir) {
-    if (-not (Test-Path -LiteralPath $TargetDir -PathType Container)) { return }
-    # Avoid a machine-wide WMI query; only inspect expected legacy services.
-    $names = @("GGSystemMonitor", "LibreHardwareMonitorLib", "OpenHardwareMonitorLib", "WinRing0_1_2_0") +
-        @(Get-ChildItem -LiteralPath $TargetDir -Filter "*.sys" -File -ErrorAction Stop | ForEach-Object BaseName)
-    $prefix = [IO.Path]::GetFullPath($TargetDir).TrimEnd('\') + '\'
-    foreach ($name in ($names | Select-Object -Unique)) {
-        if ($name -eq "PawnIO") { continue } # Shared driver, not part of app cleanup.
-        $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$name"
-        if (-not (Test-Path -LiteralPath $key)) { continue }
-        $driver = Get-ItemProperty -LiteralPath $key -ErrorAction Stop
-        if ($driver.Type -notin @(1, 2)) { continue }
-        $image = [Environment]::ExpandEnvironmentVariables(([string]$driver.ImagePath).Trim().Trim('"'))
-        if ($image.StartsWith('\??\')) { $image = $image.Substring(4) }
-        if ($image.StartsWith('\SystemRoot\', [StringComparison]::OrdinalIgnoreCase)) {
-            $image = Join-Path $env:SystemRoot $image.Substring(12)
-        } elseif ($image.StartsWith('System32\', [StringComparison]::OrdinalIgnoreCase)) {
-            $image = Join-Path $env:SystemRoot $image
-        }
-        if ($image -notmatch '^[A-Za-z]:\\') { continue }
-        $image = [IO.Path]::GetFullPath($image)
-        if (-not $image.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { continue }
-        Invoke-LegacyDriverCommand stop $name
-        Invoke-LegacyDriverCommand delete $name
-    }
+function Find-LegacyDriverServices([string]$ExpectedPath, [scriptblock]$Pulse) {
+    # Local service registry only, no WMI/CIM or machine-wide driver operations.
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine', 'Registry64')
+    try {
+        $services = $base.OpenSubKey('SYSTEM\CurrentControlSet\Services')
+        if (-not $services) { return }
+        try {
+            foreach ($name in $services.GetSubKeyNames()) {
+                & $Pulse | Out-Null
+                if ($name -eq 'PawnIO' -or $name -match '["\x00-\x1f]') { continue }
+                $key = $null
+                try {
+                    $key = $services.OpenSubKey($name)
+                    if (-not $key -or $key.GetValue('Type') -notin @(1, 2)) { continue }
+                    $image = [Environment]::ExpandEnvironmentVariables(([string]$key.GetValue('ImagePath')).Trim().Trim('"'))
+                    if ($image.StartsWith('\??\')) { $image = $image.Substring(4) }
+                    if ($image.StartsWith('\SystemRoot\', [StringComparison]::OrdinalIgnoreCase)) {
+                        $image = Join-Path $env:SystemRoot $image.Substring(12)
+                    } elseif ($image.StartsWith('System32\', [StringComparison]::OrdinalIgnoreCase)) {
+                        $image = Join-Path $env:SystemRoot $image
+                    }
+                    if ($image -match '^[A-Za-z]:\\' -and [IO.Path]::GetFullPath($image) -eq $ExpectedPath) { $name }
+                } catch [Security.SecurityException] {}
+                catch [UnauthorizedAccessException] {}
+                catch [ArgumentException] {}
+                finally { if ($key) { $key.Dispose() } }
+            }
+        } finally { $services.Dispose() }
+    } finally { $base.Dispose() }
 }
 
-function Remove-SysFilesWithRetry([string]$TargetDir) {
-    if (-not (Test-Path -LiteralPath $TargetDir -PathType Container)) { return }
-    foreach ($file in @(Get-ChildItem -LiteralPath $TargetDir -Filter "*.sys" -File -ErrorAction Stop | Where-Object Name -ne "PawnIO.sys")) {
-        $deadline = [Diagnostics.Stopwatch]::StartNew()
-        do {
-            try {
-                if (Test-Path -LiteralPath $file.FullName) { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop }
-                break
-            } catch {
-                if ($deadline.Elapsed.TotalSeconds -ge 5) { throw "Unable to remove legacy driver '$($file.Name)'. Restart Windows and retry. $($_.Exception.Message)" }
-                Start-Sleep -Milliseconds 250
+function Remove-LegacyDriverFile([string]$Path, [scriptblock]$Pulse) {
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        try {
+            if (Test-Path -LiteralPath $Path -ErrorAction Stop) {
+                Assert-UnlinkedSetupPath $Path
+                Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
             }
-        } while ($true)
+            return
+        } catch {
+            if ($clock.ElapsedMilliseconds -ge 3500) { throw }
+            & $Pulse | Out-Null
+            Start-Sleep -Milliseconds 150
+        }
+    } while ($true)
+}
+
+function Clear-LegacyAppDriver([string]$TargetDir, [scriptblock]$OnStatus = {}, [scriptblock]$Pulse = {}) {
+    $path = Join-Path $TargetDir 'GGSystemMonitor.sys'
+    if (-not (Test-Path -LiteralPath $path -ErrorAction Stop)) { return }
+    Assert-UnlinkedSetupPath $path
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf -ErrorAction Stop)) {
+        throw "Expected a regular legacy driver file, not a directory: '$path'."
     }
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $serviceWarning = $null
+    try {
+        foreach ($name in @(Find-LegacyDriverServices $path $Pulse)) {
+            if ($clock.ElapsedMilliseconds -ge 12000) { throw 'The legacy service cleanup time limit was reached.' }
+            & $OnStatus "Releasing legacy driver service '$name'..." | Out-Null
+            foreach ($action in @('stop', 'delete')) {
+                try { Invoke-LegacyDriverCommand $action $name $Pulse }
+                catch {
+                    $serviceWarning = $_.Exception.Message
+                    & $OnStatus $serviceWarning | Out-Null
+                }
+            }
+        }
+    } catch {
+        $serviceWarning = $_.Exception.Message
+        & $OnStatus $serviceWarning | Out-Null
+    }
+    try {
+        # Keep the file available for another cleanup attempt if service
+        # release failed; don't make an incomplete uninstall look complete.
+        if (-not $serviceWarning) { Remove-LegacyDriverFile $path $Pulse }
+    } catch {
+        $detail = "Could not remove '$path' (0x{0:X8}): {1}" -f $_.Exception.HResult, $_.Exception.Message
+        & $OnStatus $detail | Out-Null
+        return "$detail Restart Windows and retry. Setup did not change permissions or security settings."
+    }
+    if ($serviceWarning) { return "$serviceWarning Restart Windows and retry to finish legacy driver cleanup." }
 }
 
 function Invoke-AppInstallation($Options, $Messages) {
     $ErrorActionPreference = "Stop"
     $SourceDir = $Options.SourceDir
     $InstallDir = Resolve-SetupDestination $Options.InstallDir $SourceDir "GGSystemMonitor.exe"
+    Assert-UnlinkedSetupPath $InstallDir
     $isUpdate = $Options.IsUpdate
     $isSameVersion = $Options.IsSameVersion
     $AppName = "GGSystemMonitor"
@@ -132,19 +214,19 @@ function Invoke-AppInstallation($Options, $Messages) {
     }
 
     & $report 18 "Closing running copies of this installation..."
-    Stop-InstalledMonitor $ExePath
+    Stop-InstalledMonitor $ExePath { param($message) & $report 18 $message }
 
     & $report 25 "Checking for legacy driver files..."
-    Stop-HardwareMonitorDrivers $InstallDir
-    Remove-SysFilesWithRetry $InstallDir
+    $legacyNotice = Clear-LegacyAppDriver $InstallDir { param($message) & $report 25 $message }
 
     & $report 40 "Checking application files for locks..."
     $files = @(Get-ChildItem -LiteralPath $SourceDir -File | Where-Object {
-        $_.Name -ne "settings.json" -or -not (Test-Path -LiteralPath (Join-Path $InstallDir $_.Name))
+        $_.Extension -ne ".sys" -and ($_.Name -ne "settings.json" -or -not (Test-Path -LiteralPath (Join-Path $InstallDir $_.Name)))
     } | Sort-Object { $_.Name -eq $ExeName })
     foreach ($file in $files) {
         $destination = Join-Path $InstallDir $file.Name
         if (Test-Path -LiteralPath $destination) {
+            Assert-UnlinkedSetupPath $destination
             try { [IO.File]::Open($destination, "Open", "ReadWrite", "None").Dispose() }
             catch { throw "Cannot replace '$($file.Name)'. Close the application or restart Windows and retry. $($_.Exception.Message)" }
         }
@@ -164,6 +246,7 @@ function Invoke-AppInstallation($Options, $Messages) {
     # Scheduled task is an install-time preference. Updates preserve the
     # user's existing startup choice instead of recreating it implicitly.
     $notice = $prerequisites.Notice
+    if ($legacyNotice) { $notice = ("$notice Legacy driver cleanup is incomplete. $legacyNotice").Trim() }
     try {
         if (-not $isUpdate) {
             if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
